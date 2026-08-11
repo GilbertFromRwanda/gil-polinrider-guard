@@ -1,0 +1,6 @@
+function main() {
+  console.log("[polinrider-guard example] harmless placeholder executed from a file disguised as an image asset");
+}
+
+main();
+module.exports = {};

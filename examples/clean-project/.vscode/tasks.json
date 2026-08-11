@@ -1,0 +1,14 @@
+{
+  // A normal, manually-triggered build task. No runOn:folderOpen, no
+  // stealth presentation settings -- this is what a legitimate tasks.json
+  // looks like, used to confirm the vscode scanner doesn't false-positive.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "type": "shell",
+      "command": "npm run start",
+      "problemMatcher": []
+    }
+  ]
+}

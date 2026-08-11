@@ -1,0 +1,5 @@
+{
+  "name": "vulnerable-samples",
+  "version": "1.0.0",
+  "description": "Intentionally reproduces the structural PATTERNS of the PolinRider campaign (invisible Unicode, font-file masquerade, folderOpen auto-task) for testing polinrider-guard. Every payload here is inert -- see SAFETY.md."
+}

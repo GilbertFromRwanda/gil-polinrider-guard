@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# polinrider-guard post-merge hook.
+#
+# Runs after every `git merge` / `git pull`. Cannot block the merge (it has
+# already happened by the time this hook runs), but prints a loud warning so
+# a poisoned merge/pull doesn't go unnoticed. Includes the git-date check,
+# unlike the pre-commit hook, since real history now exists to check.
+
+if [ "${POLINRIDER_GUARD_SKIP:-0}" = "1" ]; then
+  exit 0
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+[ -n "$REPO_ROOT" ] || exit 0
+
+GUARD_CMD=()
+if command -v polinrider-guard >/dev/null 2>&1; then
+  GUARD_CMD=(polinrider-guard)
+else
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "import polinrider_guard" >/dev/null 2>&1; then
+      GUARD_CMD=("$candidate" -m polinrider_guard.guard)
+      break
+    fi
+  done
+fi
+
+if [ "${#GUARD_CMD[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+set +e
+OUTPUT="$("${GUARD_CMD[@]}" "$REPO_ROOT" 2>&1)"
+STATUS=$?
+set -e
+
+if [ "$STATUS" -ne 0 ]; then
+  echo "=====================================================================" >&2
+  echo "polinrider-guard: suspicious patterns found after merge/pull in:" >&2
+  echo "  $REPO_ROOT" >&2
+  echo "$OUTPUT" >&2
+  echo "=====================================================================" >&2
+fi
+
+exit 0

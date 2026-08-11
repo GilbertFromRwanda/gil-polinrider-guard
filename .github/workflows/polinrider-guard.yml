@@ -1,0 +1,86 @@
+name: polinrider-guard
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package (with dev/test deps)
+        run: pip install -e ".[dev]"
+      - name: Run test suite
+        run: pytest -q
+
+  self-scan:
+    # Runs polinrider-guard against this repository's own source (not the
+    # intentionally-vulnerable examples/ fixtures). A clean result here is
+    # what keeps the tool trustworthy to ship.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: pip install -e .
+      - name: Scan polinrider_guard/, scripts/, and hooks/
+        run: |
+          polinrider-guard polinrider_guard --json | tee guard-report-package.json
+          polinrider-guard scripts --no-git --json | tee guard-report-scripts.json
+          polinrider-guard hooks --no-git --json | tee guard-report-hooks.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guard-self-scan-reports
+          path: guard-report-*.json
+
+  negative-control:
+    # The whole point of examples/clean-project and examples/vulnerable-samples:
+    # if detection ever regresses, one of these two checks fails loudly
+    # instead of the regression going unnoticed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: pip install -e .
+      - name: clean-project must report zero findings
+        run: polinrider-guard examples/clean-project --no-git
+      - name: vulnerable-samples must report findings (detection sanity check)
+        run: |
+          set +e
+          polinrider-guard examples/vulnerable-samples --no-git
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::vulnerable-samples produced zero findings -- detection has regressed"
+            exit 1
+          fi
+          echo "OK: vulnerable-samples correctly flagged (exit $status)"
+
+  yara-lint:
+    # Syntax/compile check for rules/polinrider.yar so a broken rule fails
+    # CI instead of silently no-op'ing wherever it's deployed downstream.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install yara-python
+        run: pip install yara-python
+      - name: Compile rules
+        run: |
+          python -c "
+          import yara
+          yara.compile(filepath='rules/polinrider.yar', externals={'filename': ''})
+          print('rules/polinrider.yar compiled OK')
+          "
