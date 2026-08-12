@@ -9,40 +9,52 @@ from __future__ import annotations
 import json as jsonlib
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import scan_git_dates, scan_ioc, scan_masquerade, scan_unicode, scan_vscode
+from . import (
+    scan_clock_tamper,
+    scan_commit_camouflage,
+    scan_ioc,
+    scan_masquerade,
+    scan_padding,
+    scan_vscode,
+)
 
 
-def run_guard(target: str | os.PathLike, include_git: bool = True) -> dict:
-    root = Path(target).resolve()
+# (step key, human label) for every scanner, in the order they run -- shared
+# with polinrider_guard.webapp so the web UI's progress feed matches reality
+# instead of a hardcoded guess at what the CLI is doing. The git-dependent
+# scanner (commit_camouflage) is last, since it's the one --no-git / a
+# missing .git directory skips.
+SCANNER_STEPS: list[tuple[str, str]] = [
+    ("extension_masquerade", "Extension masquerade (font-file vector)"),
+    ("vscode_tasks", "Risky VS Code tasks (TasksJacker)"),
+    ("hidden_payload_padding", "Hidden payload padding (whitespace/line-length anomaly)"),
+    ("clock_tamper_tooling", "Clock-tamper git automation (ForceMemo tooling)"),
+    ("ioc_literal_match", "Known IOC strings (C2 domains, loader markers)"),
+    ("commit_camouflage", "Commit camouflage (mass-touch decoy commit)"),
+]
 
+
+def build_report(
+    root: str | os.PathLike,
+    scanners: dict[str, list[dict]],
+    git_skipped_reason: str | None = None,
+) -> dict:
+    """Assemble the summary/severity-count envelope around raw scanner output.
+
+    Split out of run_guard() so callers that need to report progress between
+    scanners (the web UI) can run each scanner themselves and still produce
+    an identical report shape at the end.
+    """
     report: dict = {
-        "target": str(root),
-        "scanners": {},
+        "target": str(Path(root).resolve()),
+        "scanners": dict(scanners),
         "summary": {"total_findings": 0, "by_severity": {}},
     }
-
-    unicode_findings = [f.to_dict() for f in scan_unicode.scan_path(root)]
-    masquerade_findings = [f.to_dict() for f in scan_masquerade.scan_path(root)]
-    vscode_findings = [f.to_dict() for f in scan_vscode.scan_path(root)]
-    ioc_findings = [f.to_dict() for f in scan_ioc.scan_path(root)]
-
-    report["scanners"]["invisible_unicode"] = unicode_findings
-    report["scanners"]["extension_masquerade"] = masquerade_findings
-    report["scanners"]["vscode_tasks"] = vscode_findings
-    report["scanners"]["ioc_literal_match"] = ioc_findings
-
-    if include_git:
-        try:
-            git_findings = [f.to_dict() for f in scan_git_dates.scan_path(root)]
-            report["scanners"]["git_date_backdating"] = git_findings
-        except scan_git_dates.NotAGitRepoError:
-            report["scanners"]["git_date_backdating"] = []
-            report["git_skipped_reason"] = "not a git repository"
-    else:
-        report["scanners"]["git_date_backdating"] = []
-        report["git_skipped_reason"] = "--no-git"
+    if git_skipped_reason:
+        report["git_skipped_reason"] = git_skipped_reason
 
     all_findings = [
         finding
@@ -59,6 +71,45 @@ def run_guard(target: str | os.PathLike, include_git: bool = True) -> dict:
     return report
 
 
+def run_guard(target: str | os.PathLike, include_git: bool = True) -> dict:
+    root = Path(target).resolve()
+
+    # Each scanner does its own independent os.walk (some also shell out to
+    # git) over the same read-only tree -- nothing shared/mutable between
+    # them, so running them concurrently is safe and, for a large repo,
+    # meaningfully faster than the equivalent sequential sum.
+    tasks: dict[str, object] = {
+        "extension_masquerade": lambda: scan_masquerade.scan_path(root),
+        "vscode_tasks": lambda: scan_vscode.scan_path(root),
+        "hidden_payload_padding": lambda: scan_padding.scan_path(root),
+        "clock_tamper_tooling": lambda: scan_clock_tamper.scan_path(root),
+        "ioc_literal_match": lambda: scan_ioc.scan_path(root),
+    }
+    if include_git:
+        tasks["commit_camouflage"] = lambda: scan_commit_camouflage.scan_path(root)
+
+    scanners: dict[str, list[dict]] = {}
+    git_skipped_reason = None
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = {key: executor.submit(fn) for key, fn in tasks.items()}
+        for key, future in futures.items():
+            if key == "commit_camouflage":
+                try:
+                    scanners[key] = [f.to_dict() for f in future.result()]
+                except scan_commit_camouflage.NotAGitRepoError:
+                    scanners[key] = []
+                    git_skipped_reason = "not a git repository"
+            else:
+                scanners[key] = [f.to_dict() for f in future.result()]
+
+    if not include_git:
+        scanners["commit_camouflage"] = []
+        git_skipped_reason = "--no-git"
+
+    return build_report(root, scanners, git_skipped_reason)
+
+
 def _print_text_report(report: dict) -> None:
     target = report["target"]
     total = report["summary"]["total_findings"]
@@ -71,13 +122,7 @@ def _print_text_report(report: dict) -> None:
     print(f"Total findings: {total}  ({_format_severity_counts(report['summary']['by_severity'])})")
     print()
 
-    labels = {
-        "invisible_unicode": "Invisible Unicode (Glassworm)",
-        "extension_masquerade": "Extension masquerade (font-file vector)",
-        "vscode_tasks": "Risky VS Code tasks (TasksJacker)",
-        "git_date_backdating": "Git author/committer date gaps (ForceMemo)",
-        "ioc_literal_match": "Known IOC strings (C2 domains, loader markers)",
-    }
+    labels = dict(SCANNER_STEPS)
 
     for key, findings in report["scanners"].items():
         if not findings:
@@ -93,16 +138,23 @@ def _print_text_report(report: dict) -> None:
 
 def _print_finding_line(scanner: str, f: dict) -> None:
     sev = f.get("severity", "?").upper()
-    if scanner == "invisible_unicode":
-        print(f"  [{sev}] {f['file']}:{f['line']}:{f['column']} {f['codepoint']} - {f['description']}")
-    elif scanner == "extension_masquerade":
+    if scanner == "extension_masquerade":
         print(f"  [{sev}] {f['file']} claims {f['claimed_type']} but is {f['actual_type']}")
     elif scanner == "vscode_tasks":
         print(f"  [{sev}] {f['file']} task '{f['task_label']}': {'; '.join(f['reasons'])}")
-    elif scanner == "git_date_backdating":
-        print(f"  [{sev}] {f['commit'][:12]} gap={f['gap_human']} - {f['subject']}")
     elif scanner == "ioc_literal_match":
         print(f"  [{sev}] {f['file']}:{f['line']} - {f['description']} ({f['matched_text']!r})")
+    elif scanner == "hidden_payload_padding":
+        print(f"  [{sev}] {f['file']}:{f['line']} ({f['kind']}, {f['line_length']} chars)")
+        print(f"      {f['context']}")
+    elif scanner == "clock_tamper_tooling":
+        print(f"  [{sev}] {f['file']}: {'; '.join(f['indicators'])}")
+    elif scanner == "commit_camouflage":
+        print(
+            f"  [{sev}] {f['commit'][:12]} - {f['subject']} "
+            f"({f['files_changed']} files, {f['noop_like_files']} no-op-like, "
+            f"new: {', '.join(f['suspicious_new_files'])})"
+        )
     else:
         print(f"  [{sev}] {f}")
 

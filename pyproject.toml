@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gil-polinrider-guard"
 version = "0.1.0"
-description = "Detection tooling for the PolinRider DPRK-linked supply-chain campaign (invisible Unicode, font-file masquerade, TasksJacker, ForceMemo git backdating)."
+description = "Detection tooling for the PolinRider DPRK-linked supply-chain campaign (font-file masquerade, TasksJacker, EtherHiding/HiddenSpawn, ForceMemo git backdating)."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -13,17 +13,23 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+web = ["fastapi>=0.100", "uvicorn>=0.23"]
 
 [project.scripts]
-polinrider-scan-unicode = "polinrider_guard.scan_unicode:main"
 polinrider-scan-masquerade = "polinrider_guard.scan_masquerade:main"
 polinrider-scan-vscode = "polinrider_guard.scan_vscode:main"
-polinrider-scan-git-dates = "polinrider_guard.scan_git_dates:main"
 polinrider-scan-ioc = "polinrider_guard.scan_ioc:main"
+polinrider-scan-padding = "polinrider_guard.scan_padding:main"
+polinrider-scan-clock-tamper = "polinrider_guard.scan_clock_tamper:main"
+polinrider-scan-commit-camouflage = "polinrider_guard.scan_commit_camouflage:main"
 polinrider-guard = "polinrider_guard.guard:main"
+polinrider-guard-web = "polinrider_guard.webapp:main"
 
 [tool.setuptools.packages.find]
 include = ["polinrider_guard*"]
+
+[tool.setuptools.package-data]
+polinrider_guard = ["web_static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

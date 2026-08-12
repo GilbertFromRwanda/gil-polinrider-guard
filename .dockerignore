@@ -1,3 +1,4 @@
+.git
 __pycache__/
 *.pyc
 *.egg-info/
@@ -6,5 +7,7 @@ __pycache__/
 venv/
 build/
 dist/
-callback_dump.py
-.env
+tests/
+examples/
+docs/
+.github/

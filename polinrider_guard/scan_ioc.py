@@ -1,10 +1,10 @@
 """Literal IOC scanner for confirmed PolinRider fingerprints.
 
-Complements scan_unicode.py: that module finds the payload when it's hidden
-behind invisible Unicode; this one finds it when it's sitting in plain
-sight -- e.g. a decoded/deobfuscated blob, a debug build, or a variant that
-hasn't adopted the Glassworm hiding technique. It reuses the same pattern
-list as scripts/surgical_clean.py so detection and remediation stay in sync.
+Finds known-malicious patterns sitting in plain sight -- e.g. a
+decoded/deobfuscated blob, a debug build, or a variant that hides its
+payload behind whitespace padding (scan_padding.py) rather than invisible
+codepoints. It reuses the same pattern list as scripts/surgical_clean.py so
+detection and remediation stay in sync.
 """
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import allowlist
 from .iocs import DEFAULT_IOC_PATTERNS
-from .scan_unicode import SKIP_DIR_NAMES, SKIP_EXTENSIONS
+from .skip_lists import SKIP_DIR_NAMES, SKIP_EXTENSIONS, SKIP_FILENAME_SUFFIXES
 
 
 @dataclass
@@ -42,6 +43,8 @@ def _iter_candidate_files(root: Path):
         for name in filenames:
             path = Path(dirpath) / name
             if path.suffix.lower() in SKIP_EXTENSIONS:
+                continue
+            if name.lower().endswith(SKIP_FILENAME_SUFFIXES):
                 continue
             yield path
 
@@ -81,15 +84,20 @@ def scan_file(path: Path, root: Path, patterns: list[tuple[re.Pattern, str, str]
 
 def scan_path(target: str | os.PathLike) -> list[IocFinding]:
     root = Path(target).resolve()
+    entries = allowlist.load_allowlist(root)
     patterns = [(re.compile(p), desc, sev) for p, desc, sev in DEFAULT_IOC_PATTERNS]
 
     if root.is_file():
-        return scan_file(root, root.parent, patterns)
+        findings = scan_file(root, root.parent, patterns)
+    else:
+        findings = []
+        for path in _iter_candidate_files(root):
+            findings.extend(scan_file(path, root, patterns))
 
-    findings: list[IocFinding] = []
-    for path in _iter_candidate_files(root):
-        findings.extend(scan_file(path, root, patterns))
-    return findings
+    return [
+        f for f in findings
+        if not allowlist.is_file_line_allowlisted(entries, "ioc_literal_match", f.file, f.line)
+    ]
 
 
 def main(argv: list[str] | None = None) -> int:

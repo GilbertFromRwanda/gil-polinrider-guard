@@ -1,0 +1,41 @@
+services:
+  guard:
+    build: .
+    volumes:
+      - ${SCAN_PATH:-.}:/scan:ro
+    command: ["."]
+
+  web:
+    build: .
+    entrypoint: ["polinrider-guard-web"]
+    # --batch-workers controls how many repos "scan all repos under this
+    # path" scans concurrently (default 8) -- override with
+    # BATCH_WORKERS=16 docker compose up web if you're scanning a large
+    # workspace and have the cores/disk throughput to back a higher number.
+    command: ["--host", "0.0.0.0", "--port", "8765", "--batch-workers", "${BATCH_WORKERS:-8}"]
+    ports:
+      - "8765:8765"
+    volumes:
+      # Enter "/scan" in the web UI's local-path field to scan this.
+      # Read-only by default: the Recovery panel's git-history rewrite never
+      # needs write access here (it works on a disposable server-side mirror
+      # clone), but its "Remove risky task(s)" action does -- it edits
+      # .vscode/tasks.json directly in the scanned directory, since that's a
+      # live config file, not git history. With :ro, that one action will
+      # fail with a clear "read-only file system" error. Change :ro to :rw
+      # below only if you want that action to work and trust this container
+      # with write access to whatever SCAN_PATH points at.
+      - ${SCAN_PATH:-.}:/scan:ro
+      # Optional, off by default: mount a broader chunk of the host
+      # filesystem so the local-path Browse... modal (click its "Host"
+      # button) can reach more than just SCAN_PATH. The container can only
+      # ever see what's mounted into it -- this is what actually widens
+      # that, on any host OS, by setting HOST_ROOT before starting:
+      #   Windows (PowerShell): $env:HOST_ROOT="C:/Users/you"; docker compose up web
+      #   Windows (bash):       HOST_ROOT=C:/Users/you docker compose up web
+      #   macOS:                HOST_ROOT=/Users/you docker compose up web
+      #   Linux:                HOST_ROOT=/home/you docker compose up web
+      # Defaults to "." (this project dir) so nothing changes if unset.
+      # Widens what the container -- and anyone who reaches the web UI --
+      # can read; only set this on a host-only, trusted deployment.
+      - ${HOST_ROOT:-.}:/host:ro

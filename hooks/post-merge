@@ -4,8 +4,9 @@
 #
 # Runs after every `git merge` / `git pull`. Cannot block the merge (it has
 # already happened by the time this hook runs), but prints a loud warning so
-# a poisoned merge/pull doesn't go unnoticed. Includes the git-date check,
-# unlike the pre-commit hook, since real history now exists to check.
+# a poisoned merge/pull doesn't go unnoticed. Includes the commit-camouflage
+# check (skipped by the pre-commit hook via --no-git), since real history
+# now exists to walk.
 
 if [ "${POLINRIDER_GUARD_SKIP:-0}" = "1" ]; then
   exit 0

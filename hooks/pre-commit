@@ -3,9 +3,12 @@
 # polinrider-guard pre-commit hook.
 #
 # Blocks a commit if the working tree contains PolinRider-pattern findings
-# (invisible Unicode, font-file masquerade, risky VS Code tasks, known IOC
-# strings). This is a backstop, not a replacement for the pre-open checklist
-# -- it only catches what's already in your working tree at commit time.
+# (font-file masquerade, risky VS Code tasks, known IOC strings, hidden
+# payload padding, clock-tamper tooling -- the working-tree-scoped
+# scanners; --no-git skips the commit-camouflage check, which needs real
+# git history to walk). This is a backstop, not a replacement for the
+# pre-open checklist -- it only catches what's already in your working
+# tree at commit time.
 #
 # Bypass for a single commit (e.g. known false positive):
 #   POLINRIDER_GUARD_SKIP=1 git commit ...

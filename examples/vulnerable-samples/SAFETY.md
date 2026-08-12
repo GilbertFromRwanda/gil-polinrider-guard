@@ -5,9 +5,6 @@ PolinRider campaign so that `polinrider-guard` (and its component scanners)
 can be tested against real positive cases. None of it is functional malware,
 and none of it is a byte-identical copy of any real published sample:
 
-- `app.js` contains inert invisible Unicode characters (zero-width space,
-  a variation selector, a private-use-area character) sitting in a comment
-  and a string literal. They do not change what the function does.
 - `lib/analytics.js` contains an unused string constant with a known
   BeaverTail C2 domain fragment. It is never read or called.
 - `assets/img/brand-mark.png` is plain JavaScript with a `.png` name,

@@ -1,0 +1,1415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gil-Polinrider-Guard</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121820;
+    --border: #22303c;
+    --text: #d7e1e8;
+    --muted: #7c8b98;
+    --accent: #4fd1c5;
+    --critical: #ff5470;
+    --high: #ff9f43;
+    --medium: #f6c343;
+    --low: #6c9ecf;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem 1rem 4rem;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  p.sub { color: var(--muted); margin: 0 0 1.5rem; }
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  .mode-toggle {
+    display: flex;
+    gap: 1.2rem;
+    font-size: .85rem;
+    color: var(--muted);
+  }
+  .mode-toggle label {
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+    cursor: pointer;
+  }
+  .fields { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .fields.hidden { display: none; }
+  .hint { color: var(--muted); font-size: .75rem; flex-basis: 100%; }
+  input {
+    background: #0b0f14;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: .6rem .7rem;
+    border-radius: 6px;
+    font: inherit;
+  }
+  input[name=url] { flex: 1 1 320px; }
+  input[name=ref] { flex: 0 1 140px; }
+  input[name=token] { flex: 1 1 220px; }
+  input[name=path] { flex: 1 1 100%; }
+  button {
+    background: var(--accent);
+    color: #06201d;
+    border: none;
+    padding: .6rem 1.1rem;
+    border-radius: 6px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    align-self: flex-start;
+  }
+  button:disabled { opacity: .5; cursor: wait; }
+  .btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: .5rem .9rem;
+    border-radius: 6px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .btn-secondary:disabled { opacity: .4; cursor: default; }
+  .modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 1rem;
+  }
+  .modal.hidden { display: none; }
+  .modal-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: min(560px, 100%);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .7rem .9rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .modal-path {
+    font-size: .8rem;
+    color: var(--muted);
+    overflow-x: auto;
+    white-space: nowrap;
+    flex: 1;
+  }
+  .browse-list { overflow-y: auto; flex: 1; min-height: 160px; }
+  .browse-row {
+    padding: .5rem .9rem;
+    font-size: .85rem;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .browse-row:last-child { border-bottom: none; }
+  .browse-row:hover { background: rgba(79, 209, 197, .08); }
+  .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: .5rem;
+    padding: .7rem .9rem;
+    border-top: 1px solid var(--border);
+  }
+  #progress {
+    display: none;
+    margin-top: 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .step {
+    font-size: .85rem;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .step:last-child { border-bottom: none; }
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .5rem .9rem;
+    cursor: pointer;
+  }
+  .step-toggle {
+    flex: 0 0 auto;
+    width: 1em;
+    background: none;
+    border: none;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    cursor: pointer;
+    display: inline-block;
+    transition: transform .15s;
+  }
+  .step.collapsed .step-toggle { transform: rotate(-90deg); }
+  .step-icon {
+    flex: 0 0 auto;
+    width: 1em;
+    text-align: center;
+  }
+  .step-title { flex: 1; }
+  .step-detail {
+    padding: 0 .9rem .6rem 2.4rem;
+    font-size: .8rem;
+    color: var(--muted);
+  }
+  .step-detail:empty { display: none; }
+  .step.collapsed .step-detail { display: none; }
+  .step-pending .step-icon::before { content: "○"; }
+  .step-running .step-icon::before { content: "⟳"; display: inline-block; animation: spin 0.8s linear infinite; }
+  .step-done .step-icon::before { content: "✓"; }
+  .step-error .step-icon::before { content: "✕"; }
+  .step-running .step-header { color: var(--accent); }
+  .step-done .step-header { color: var(--text); }
+  .step-error .step-header { color: var(--critical); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #status, #recover-analyze-status { margin-top: 1rem; color: var(--muted); min-height: 1.4em; }
+  #results { margin-top: 1.5rem; }
+  .summary {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background: var(--panel);
+  }
+  .summary.clean { border-color: #1f7a5c; }
+  .summary.dirty { border-color: var(--critical); }
+  .summary .loc { color: var(--muted); margin-top: .4rem; font-size: .8rem; }
+  .badge {
+    display: inline-block;
+    padding: .1rem .5rem;
+    border-radius: 999px;
+    font-size: .75rem;
+    font-weight: 700;
+    margin-right: .35rem;
+    text-transform: uppercase;
+  }
+  .badge.critical { background: var(--critical); color: #2a0010; }
+  .badge.high { background: var(--high); color: #2a1400; }
+  .badge.medium { background: var(--medium); color: #2a2000; }
+  .badge.low { background: var(--low); color: #001428; }
+  .badge.unknown { background: var(--muted); color: #06201d; }
+  .scanner {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    overflow: hidden;
+  }
+  .scanner h2 {
+    font-size: .95rem;
+    margin: 0;
+    padding: .7rem 1rem;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .finding {
+    padding: .6rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: .85rem;
+  }
+  .finding:last-child { border-bottom: none; }
+  .batch-table {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 1rem;
+  }
+  .batch-row {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .6rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: .85rem;
+    background: var(--panel);
+  }
+  .batch-row:last-child { border-bottom: none; }
+  .batch-row-name { flex: 1; overflow-wrap: anywhere; }
+  .batch-row.clean .batch-row-name { color: var(--muted); }
+  .batch-row-badges { flex: 0 0 auto; white-space: nowrap; }
+  .finding .ctx {
+    display: block;
+    margin-top: .25rem;
+    color: var(--muted);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .view-file-btn {
+    margin-left: .5rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--accent);
+    padding: .1rem .5rem;
+    border-radius: 4px;
+    font: inherit;
+    font-size: .75rem;
+    cursor: pointer;
+  }
+  .view-file-btn:hover { background: rgba(79, 209, 197, .08); }
+  #file-viewer-modal .modal-panel { width: min(900px, 95vw); }
+  #file-viewer-body {
+    overflow: auto;
+    flex: 1;
+    background: #0b0f14;
+    min-height: 200px;
+  }
+  #file-viewer-body pre {
+    margin: 0;
+    padding: .75rem 1rem;
+    font-size: .8rem;
+    line-height: 1.5;
+    white-space: pre;
+  }
+  .file-viewer-highlight {
+    background: rgba(255, 84, 112, .25);
+    outline: 1px solid var(--critical);
+  }
+  .error {
+    border: 1px solid var(--critical);
+    background: #2a0010;
+    color: #ffb3c1;
+    border-radius: 8px;
+    padding: 1rem;
+    white-space: pre-wrap;
+  }
+  #recovery-panel {
+    margin-top: 2rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    background: var(--panel);
+  }
+  #recovery-panel.hidden { display: none; }
+  #recovery-panel h2 { font-size: 1.1rem; margin: 0 0 .4rem; }
+  #recovery-panel .hint { margin-top: 0; }
+  #recovery-panel > button,
+  #recover-apply-section > button {
+    margin-top: .75rem;
+  }
+  #recover-apply-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+  }
+  #recover-apply-section.hidden { display: none; }
+  #recover-push-fields {
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+  }
+  #recover-push-fields.hidden { display: none; }
+  .warning-box {
+    border: 1px solid var(--high);
+    background: #2a1a00;
+    color: #ffd699;
+    border-radius: 8px;
+    padding: .75rem;
+    font-size: .85rem;
+  }
+  .warning-box.critical {
+    border-color: var(--critical);
+    background: #2a0010;
+    color: #ffb3c1;
+  }
+  .field-label { font-size: .8rem; color: var(--muted); }
+  .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .85rem;
+    cursor: pointer;
+  }
+  .checkbox-label input[type=checkbox] { width: auto; }
+  code {
+    background: #0b0f14;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: .05rem .35rem;
+    font-size: .85em;
+  }
+  #recover-analyze-result, #recover-result { margin-top: .75rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Gil-Polinrider-Guard</h1>
+  <p class="sub">Scan a git repository for PolinRider IOCs before you clone it onto your machine.</p>
+
+  <form id="scan-form">
+    <div class="mode-toggle">
+      <label><input type="radio" name="mode" value="url" checked> Git URL</label>
+      <label><input type="radio" name="mode" value="path"> Local path (already cloned)</label>
+    </div>
+
+    <div id="url-fields" class="fields">
+      <input name="url" type="text" placeholder="https://github.com/owner/repo.git" required autofocus>
+      <input name="ref" type="text" placeholder="branch (optional)">
+      <input name="token" type="password" autocomplete="off" placeholder="access token (optional, for private repos)">
+      <div class="hint">Token is sent once for this scan only, never stored or logged.</div>
+    </div>
+
+    <div id="path-fields" class="fields hidden">
+      <input name="path" type="text" placeholder="/path/to/already-cloned/repo">
+      <button type="button" id="browse-btn" class="btn-secondary">Browse…</button>
+      <button type="button" id="batch-scan-btn" class="btn-secondary">Scan all repos under this path</button>
+      <div class="hint">Under Docker Compose, enter "/scan" to scan whatever SCAN_PATH points at (defaults to the project directory).</div>
+      <div class="hint">"Scan all repos" treats the path as a parent folder and scans every git repository found under it.</div>
+    </div>
+
+    <button type="submit" id="scan-btn">Scan</button>
+  </form>
+
+  <div id="progress"></div>
+  <div id="status"></div>
+  <div id="results"></div>
+
+  <div id="recovery-panel" class="hidden">
+    <h2>Recovery</h2>
+    <p class="hint">
+      Strip known IOC lines from this repo's entire git history, without destroying
+      legitimate work committed on top. Works on a disposable copy — the directory
+      you scanned is never modified directly. If you don't also enable force-push
+      below, the rewrite is verified then discarded (nothing persists to push later);
+      check that box to actually publish the fix, or use
+      <code>scripts/surgical_clean.py</code> from the CLI for full manual control
+      over the resulting mirror clone.
+    </p>
+    <button type="button" id="recover-analyze-btn" class="btn-secondary">Check what would be cleaned</button>
+    <div id="recover-analyze-progress"></div>
+    <div id="recover-analyze-status"></div>
+    <div id="recover-analyze-result"></div>
+
+    <div id="recover-apply-section" class="hidden">
+      <div class="warning-box">
+        This creates a disposable mirror clone of the repo and rewrites history
+        there via git-filter-repo. The directory you scanned is not touched.
+      </div>
+      <label class="field-label" for="recover-confirm-input">Type <code>REWRITE HISTORY</code> to enable:</label>
+      <input type="text" id="recover-confirm-input" placeholder="REWRITE HISTORY" autocomplete="off">
+
+      <label class="checkbox-label">
+        <input type="checkbox" id="recover-push-checkbox">
+        Also force-push the rewritten history to this repo's <code>origin</code> remote
+      </label>
+
+      <div id="recover-push-fields" class="hidden">
+        <div class="warning-box critical">
+          This overwrites the remote's history. Every collaborator's local clone
+          will diverge and need to be re-cloned. This cannot be undone.
+        </div>
+        <input type="password" id="recover-push-token" placeholder="access token (optional, for private repos)" autocomplete="off">
+        <label class="field-label" for="recover-push-confirm-input">Type <code>FORCE PUSH</code> to enable:</label>
+        <input type="text" id="recover-push-confirm-input" placeholder="FORCE PUSH" autocomplete="off">
+      </div>
+
+      <button type="button" id="recover-apply-btn" disabled>Rewrite history</button>
+
+      <div id="recover-progress"></div>
+      <div id="recover-status"></div>
+      <div id="recover-result"></div>
+    </div>
+
+    <div id="recover-remove-tasks-section" class="hidden">
+      <div class="warning-box">
+        Edits <code>.vscode/tasks.json</code> directly in the directory you scanned,
+        removing only the risky task(s) found and leaving any other tasks in the file
+        untouched. This rewrites the file's JSON structure, so comments (if any) are
+        lost and formatting is normalized. It's a normal working-tree change — if the
+        file is tracked, <code>git checkout -- .vscode/tasks.json</code> undoes it.
+      </div>
+      <label class="field-label" for="recover-remove-tasks-confirm-input">Type <code>REMOVE TASK</code> to enable:</label>
+      <input type="text" id="recover-remove-tasks-confirm-input" placeholder="REMOVE TASK" autocomplete="off">
+      <button type="button" id="recover-remove-tasks-btn" disabled>Remove risky task(s)</button>
+      <div id="recover-remove-tasks-result"></div>
+    </div>
+  </div>
+</div>
+
+<div id="file-viewer-modal" class="modal hidden">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <span id="file-viewer-path" class="modal-path"></span>
+      <button type="button" id="file-viewer-close-btn" class="btn-secondary">Close</button>
+    </div>
+    <div id="file-viewer-body"></div>
+  </div>
+</div>
+
+<div id="browse-modal" class="modal hidden">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <button type="button" id="browse-up-btn" class="btn-secondary" title="Up one level">↑ Up</button>
+      <button type="button" id="browse-host-btn" class="btn-secondary" title="Jump to /host -- only present if HOST_ROOT was set when this container started">Host</button>
+      <span id="browse-path" class="modal-path"></span>
+    </div>
+    <div id="browse-list" class="browse-list"></div>
+    <div class="modal-footer">
+      <button type="button" id="browse-cancel-btn" class="btn-secondary">Cancel</button>
+      <button type="button" id="browse-select-btn">Select this folder</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SCANNER_LABELS = {
+  extension_masquerade: "Extension masquerade (font-file vector)",
+  vscode_tasks: "Risky VS Code tasks (TasksJacker)",
+  hidden_payload_padding: "Hidden payload padding (whitespace/line-length anomaly)",
+  clock_tamper_tooling: "Clock-tamper git automation (ForceMemo tooling)",
+  ioc_literal_match: "Known IOC strings (C2 domains, loader markers)",
+  commit_camouflage: "Commit camouflage (mass-touch decoy commit)",
+};
+
+function findingLine(scanner, f) {
+  switch (scanner) {
+    case "extension_masquerade":
+      return `${f.file} claims ${f.claimed_type} but is ${f.actual_type}`;
+    case "vscode_tasks":
+      return `${f.file} task '${f.task_label}': ${(f.reasons || []).join("; ")}`;
+    case "ioc_literal_match":
+      return `${f.file}:${f.line} - ${f.description} (${JSON.stringify(f.matched_text)})`;
+    case "hidden_payload_padding":
+      return `${f.file}:${f.line} (${f.kind}, ${f.line_length} chars) - ${f.context}`;
+    case "clock_tamper_tooling":
+      return `${f.file}: ${(f.indicators || []).join("; ")}`;
+    case "commit_camouflage":
+      return `${(f.commit || "").slice(0, 12)} - ${f.subject} (${f.files_changed} files, ${f.noop_like_files} no-op-like, new: ${(f.suspicious_new_files || []).join(", ")})`;
+    default:
+      return JSON.stringify(f);
+  }
+}
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else node.setAttribute(k, v);
+  }
+  for (const c of children) if (c) node.appendChild(c);
+  return node;
+}
+
+function renderReport(report) {
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+
+  const total = report.summary.total_findings;
+  const summary = el("div", { class: `summary ${total ? "dirty" : "clean"}` });
+  summary.appendChild(el("strong", { text: total ? `${total} finding(s)` : "No findings" }));
+  if (total) {
+    const bySev = report.summary.by_severity || {};
+    for (const sev of ["critical", "high", "medium", "low", "unknown"]) {
+      if (bySev[sev]) {
+        summary.appendChild(document.createTextNode(" "));
+        summary.appendChild(el("span", { class: `badge ${sev}`, text: `${sev} ${bySev[sev]}` }));
+      }
+    }
+  }
+  if (report.git_skipped_reason) {
+    summary.appendChild(el("div", { class: "loc", text: `git checks skipped: ${report.git_skipped_reason}` }));
+  }
+  results.appendChild(summary);
+
+  for (const [key, findings] of Object.entries(report.scanners || {})) {
+    if (!findings.length) continue;
+    const box = el("div", { class: "scanner" });
+    box.appendChild(el("h2", { text: `${SCANNER_LABELS[key] || key} (${findings.length})` }));
+    for (const f of findings) {
+      const row = el("div", { class: "finding" });
+      row.appendChild(el("span", { class: `badge ${f.severity || "unknown"}`, text: f.severity || "?" }));
+      row.appendChild(document.createTextNode(" " + findingLine(key, f)));
+      if (f.context) row.appendChild(el("span", { class: "ctx", text: `context: ${JSON.stringify(f.context)}` }));
+      if (f.file && report.source_path) {
+        const viewBtn = el("button", { type: "button", class: "view-file-btn", text: "View file" });
+        viewBtn.addEventListener("click", () => openFileViewer(report.source_path, f.file, f.line));
+        row.appendChild(viewBtn);
+      }
+      box.appendChild(row);
+    }
+    results.appendChild(box);
+  }
+}
+
+const STEP_ORDER = [
+  { key: "clone", label: "Clone / locate repository" },
+  { key: "extension_masquerade", label: SCANNER_LABELS.extension_masquerade },
+  { key: "vscode_tasks", label: SCANNER_LABELS.vscode_tasks },
+  { key: "hidden_payload_padding", label: SCANNER_LABELS.hidden_payload_padding },
+  { key: "clock_tamper_tooling", label: SCANNER_LABELS.clock_tamper_tooling },
+  { key: "ioc_literal_match", label: SCANNER_LABELS.ioc_literal_match },
+  { key: "commit_camouflage", label: SCANNER_LABELS.commit_camouflage },
+];
+
+// Shared by the scan progress panel and the recovery progress panel --
+// idPrefix keeps their step-row DOM ids from colliding.
+function appendProgressSteps(containerId, idPrefix, stepOrder) {
+  const progress = document.getElementById(containerId);
+  for (const step of stepOrder) {
+    const row = el("div", { class: "step step-pending", id: `${idPrefix}-${step.key}` });
+
+    const header = el("div", { class: "step-header" });
+    header.appendChild(el("span", { class: "step-toggle", text: "▾" }));
+    header.appendChild(el("span", { class: "step-icon" }));
+    header.appendChild(el("span", { class: "step-title", text: step.label }));
+    header.addEventListener("click", () => row.classList.toggle("collapsed"));
+
+    row.appendChild(header);
+    row.appendChild(el("div", { class: "step-detail" }));
+    progress.appendChild(row);
+  }
+}
+
+function renderProgressSkeleton(containerId, idPrefix, stepOrder) {
+  const progress = document.getElementById(containerId);
+  progress.style.display = "block";
+  progress.innerHTML = "";
+  appendProgressSteps(containerId, idPrefix, stepOrder);
+}
+
+function setStep(idPrefix, key, { state, label }) {
+  const row = document.getElementById(`${idPrefix}-${key}`);
+  if (!row) return;
+  row.classList.remove("step-pending", "step-running", "step-done", "step-error");
+  row.classList.add(`step-${state}`);
+  if (label) row.querySelector(".step-detail").textContent = label;
+}
+
+function markRemainingStepsErrored(idPrefix, stepOrder) {
+  for (const step of stepOrder) {
+    const row = document.getElementById(`${idPrefix}-${step.key}`);
+    if (row && row.classList.contains("step-pending")) {
+      row.classList.remove("step-pending");
+      row.classList.add("step-error");
+    }
+  }
+}
+
+const form = document.getElementById("scan-form");
+const urlFields = document.getElementById("url-fields");
+const pathFields = document.getElementById("path-fields");
+
+function updateModeVisibility() {
+  const mode = form.mode.value;
+  urlFields.classList.toggle("hidden", mode !== "url");
+  pathFields.classList.toggle("hidden", mode !== "path");
+  form.url.required = mode === "url";
+  form.path.required = mode === "path";
+}
+form.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", updateModeVisibility));
+updateModeVisibility();
+
+function showError(idPrefix, stepOrder, results, status, message) {
+  markRemainingStepsErrored(idPrefix, stepOrder);
+  status.textContent = "";
+  results.innerHTML = "";
+  results.appendChild(el("div", { class: "error", text: message }));
+}
+
+// Set on the "done" event so the submit handler below can read
+// source_path afterward -- Recovery and the file viewer both need it,
+// regardless of whether this scan was URL- or path-sourced (the server
+// keeps a URL scan's clone around now instead of deleting it).
+let lastScanReport = null;
+
+function handleSSELine(raw, status, results) {
+  const eventMatch = /^event: (.+)$/m.exec(raw);
+  const dataMatch = /^data: (.+)$/m.exec(raw);
+  if (!dataMatch) return;
+  const eventName = eventMatch ? eventMatch[1] : "message";
+  const data = JSON.parse(dataMatch[1]);
+
+  if (eventName === "progress") {
+    setStep("step", data.step, { state: data.done ? "done" : "running", label: data.label });
+    status.textContent = data.label;
+  } else if (eventName === "done") {
+    status.textContent = `Scanned ${data.target}`;
+    lastScanReport = data;
+    renderReport(data);
+  } else if (eventName === "error") {
+    showError("step", STEP_ORDER, results, status, data.message);
+  }
+}
+
+// Streamed over a POST fetch rather than EventSource: EventSource only
+// supports GET, which would put tokens/secrets in the request URL (and
+// from there into server access logs / browser devtools history). Shared
+// by the scan form and the recovery panel below.
+async function streamSSE(url, payload, onLine) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok || !resp.body) {
+    let message = `HTTP ${resp.status}`;
+    try {
+      const data = await resp.json();
+      message = data.detail || message;
+    } catch (_) {
+      /* body wasn't JSON, fall back to the status line */
+    }
+    throw new Error(message);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let sep;
+    while ((sep = buffer.indexOf("\n\n")) !== -1) {
+      const rawEvent = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      onLine(rawEvent);
+    }
+  }
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("scan-btn");
+  const status = document.getElementById("status");
+  const results = document.getElementById("results");
+
+  const payload = {};
+  if (form.mode.value === "url") {
+    payload.url = form.url.value.trim();
+    const ref = form.ref.value.trim();
+    const token = form.token.value.trim();
+    if (ref) payload.ref = ref;
+    if (token) payload.token = token;
+  } else {
+    payload.path = form.path.value.trim();
+  }
+
+  btn.disabled = true;
+  status.textContent = "Starting scan...";
+  results.innerHTML = "";
+  hideRecoveryPanel();
+  renderProgressSkeleton("progress", "step", STEP_ORDER);
+
+  try {
+    lastScanReport = null;
+    await streamSSE("/api/scan/stream", payload, (raw) => handleSSELine(raw, status, results));
+    if (lastScanReport && lastScanReport.source_path) showRecoveryPanel(lastScanReport.source_path);
+  } catch (err) {
+    showError("step", STEP_ORDER, results, status, String(err.message || err));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// --- batch scan: "scan all repos under this path" -------------------------
+// Treats the local-path field as a parent folder instead of a single repo,
+// discovers every git repo under it server-side, and scans each one with
+// the normal pipeline. Reuses the same #progress/#status/#results areas as
+// a single scan (only one view is ever active at a time) and the same
+// step-row DOM the scan/recovery panels use, except the step list isn't
+// known up front -- it's built once the "discover" step reports how many
+// repos it found, via appendProgressSteps() rather than
+// renderProgressSkeleton()'s fixed list.
+let lastBatchResult = null;
+let batchRepoPathToStepKey = {};
+
+function renderBatchDashboard(data) {
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+
+  const summary = el("div", { class: `summary ${data.total_findings ? "dirty" : "clean"}` });
+  summary.appendChild(
+    el("strong", {
+      text:
+        data.total_repos === 0
+          ? `No git repositories found under ${data.root}`
+          : `${data.total_repos} repositor${data.total_repos === 1 ? "y" : "ies"} scanned under ${data.root} — ` +
+            `${data.dirty_repos} with findings, ${data.total_findings} finding(s) total`,
+    })
+  );
+  if (data.truncated) {
+    summary.appendChild(
+      el("div", { class: "loc", text: `Showing the first ${data.repos.length} repositories found — more may exist.` })
+    );
+  }
+  results.appendChild(summary);
+
+  if (!data.repos.length) return;
+
+  const table = el("div", { class: "batch-table" });
+  for (const report of data.repos) {
+    const total = report.summary.total_findings;
+    const row = el("div", { class: `batch-row ${total ? "dirty" : "clean"}` });
+    row.appendChild(el("span", { class: "batch-row-name", text: report.source_path }));
+
+    const badges = el("span", { class: "batch-row-badges" });
+    if (total === 0) {
+      badges.appendChild(el("span", { class: "badge low", text: "clean" }));
+    } else {
+      const bySev = report.summary.by_severity || {};
+      for (const sev of ["critical", "high", "medium", "low", "unknown"]) {
+        if (bySev[sev]) badges.appendChild(el("span", { class: `badge ${sev}`, text: `${sev} ${bySev[sev]}` }));
+      }
+    }
+    row.appendChild(badges);
+
+    const viewBtn = el("button", { type: "button", class: "btn-secondary", text: "View report" });
+    viewBtn.addEventListener("click", () => showBatchRepoDetail(report));
+    row.appendChild(viewBtn);
+
+    table.appendChild(row);
+  }
+  results.appendChild(table);
+}
+
+function showBatchRepoDetail(report) {
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+
+  const backBtn = el("button", { type: "button", class: "btn-secondary", text: "← Back to all repos" });
+  backBtn.addEventListener("click", () => {
+    hideRecoveryPanel();
+    renderBatchDashboard(lastBatchResult);
+  });
+  results.appendChild(backBtn);
+
+  renderReport(report);
+  lastScanReport = report;
+  showRecoveryPanel(report.source_path);
+}
+
+function handleBatchSSELine(raw, status, results) {
+  const eventMatch = /^event: (.+)$/m.exec(raw);
+  const dataMatch = /^data: (.+)$/m.exec(raw);
+  if (!dataMatch) return;
+  const eventName = eventMatch ? eventMatch[1] : "message";
+  const data = JSON.parse(dataMatch[1]);
+
+  if (eventName === "progress") {
+    if (data.step === "discover") {
+      setStep("batch-step", "discover", { state: data.done ? "done" : "running", label: data.label });
+      status.textContent = data.label;
+      if (data.done && data.repos && data.repos.length) {
+        batchRepoPathToStepKey = {};
+        const steps = data.repos.map((r, i) => {
+          const key = `repo-${i}`;
+          batchRepoPathToStepKey[r.path] = key;
+          return { key, label: r.name };
+        });
+        appendProgressSteps("progress", "batch-step", steps);
+      }
+    } else if (data.step === "repo") {
+      const key = batchRepoPathToStepKey[data.repo_path];
+      if (key) setStep("batch-step", key, { state: data.error ? "error" : "done", label: data.label });
+      status.textContent = data.label;
+    }
+  } else if (eventName === "done") {
+    status.textContent =
+      data.total_repos > 0
+        ? `Scanned ${data.total_repos} repositor${data.total_repos === 1 ? "y" : "ies"} under ${data.root}`
+        : `No git repositories found under ${data.root}`;
+    lastBatchResult = data;
+    renderBatchDashboard(data);
+  } else if (eventName === "error") {
+    status.textContent = "";
+    results.innerHTML = "";
+    results.appendChild(el("div", { class: "error", text: data.message }));
+  }
+}
+
+document.getElementById("batch-scan-btn").addEventListener("click", async () => {
+  const path = form.path.value.trim();
+  const btn = document.getElementById("batch-scan-btn");
+  const scanBtn = document.getElementById("scan-btn");
+  const status = document.getElementById("status");
+  const results = document.getElementById("results");
+
+  if (!path) {
+    results.innerHTML = "";
+    results.appendChild(el("div", { class: "error", text: "Enter a path first." }));
+    return;
+  }
+
+  btn.disabled = true;
+  scanBtn.disabled = true;
+  status.textContent = "Starting batch scan...";
+  results.innerHTML = "";
+  hideRecoveryPanel();
+  batchRepoPathToStepKey = {};
+  renderProgressSkeleton("progress", "batch-step", [{ key: "discover", label: "Discover git repositories" }]);
+
+  try {
+    await streamSSE("/api/batch-scan/stream", { path }, (raw) => handleBatchSSELine(raw, status, results));
+  } catch (err) {
+    status.textContent = "";
+    results.innerHTML = "";
+    results.appendChild(el("div", { class: "error", text: String(err.message || err) }));
+  } finally {
+    btn.disabled = false;
+    scanBtn.disabled = false;
+  }
+});
+
+// --- local-path folder browser -------------------------------------------
+// A browser can't hand a client-side folder picker's real filesystem path
+// to the server (that's blocked by design, for privacy) -- so this lists
+// directories via /api/browse on the machine actually running the scan,
+// which is the one that needs a real path to work with.
+const browseModal = document.getElementById("browse-modal");
+const browseList = document.getElementById("browse-list");
+const browsePathEl = document.getElementById("browse-path");
+const browseUpBtn = document.getElementById("browse-up-btn");
+
+let browseCurrentPath = null;
+let browseParentPath = null;
+
+async function loadBrowseDir(path) {
+  browseList.innerHTML = "";
+  browseList.appendChild(el("div", { class: "hint", text: "Loading..." }));
+  const qs = path !== null ? `?path=${encodeURIComponent(path)}` : "";
+  try {
+    const resp = await fetch(`/api/browse${qs}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    browseCurrentPath = data.path;
+    browseParentPath = data.parent;
+    browsePathEl.textContent = data.path || "This PC";
+    browseUpBtn.disabled = data.parent === null;
+
+    browseList.innerHTML = "";
+    if (!data.dirs.length) {
+      browseList.appendChild(el("div", { class: "hint", text: "(no subfolders)" }));
+    }
+    for (const d of data.dirs) {
+      const row = el("div", { class: "browse-row", text: `\u{1F4C1} ${d.name}` });
+      row.addEventListener("click", () => loadBrowseDir(d.path));
+      browseList.appendChild(row);
+    }
+  } catch (err) {
+    browseList.innerHTML = "";
+    browseList.appendChild(el("div", { class: "error", text: String(err.message || err) }));
+  }
+}
+
+document.getElementById("browse-btn").addEventListener("click", () => {
+  browseModal.classList.remove("hidden");
+  loadBrowseDir(form.path.value.trim() || null);
+});
+
+browseUpBtn.addEventListener("click", () => {
+  if (browseParentPath !== null) loadBrowseDir(browseParentPath);
+});
+
+// /host only exists if this container was started with HOST_ROOT set (see
+// docker-compose.yml); if it wasn't, this just shows /api/browse's error
+// inline, which is self-explanatory enough alongside the button's title.
+document.getElementById("browse-host-btn").addEventListener("click", () => {
+  loadBrowseDir("/host");
+});
+
+document.getElementById("browse-cancel-btn").addEventListener("click", () => {
+  browseModal.classList.add("hidden");
+});
+
+document.getElementById("browse-select-btn").addEventListener("click", () => {
+  if (browseCurrentPath) form.path.value = browseCurrentPath;
+  browseModal.classList.add("hidden");
+});
+
+browseModal.addEventListener("click", (e) => {
+  if (e.target === browseModal) browseModal.classList.add("hidden");
+});
+
+// --- recovery (history rewrite) -------------------------------------------
+// Offered for both local-path and URL scans -- a URL scan's clone is now
+// kept on the server after scanning (replaced by the *next* URL scan's
+// clone, not deleted right away) specifically so this and the file viewer
+// have something to work with.
+const RECOVERY_STEP_ORDER = [
+  { key: "mirror", label: "Create disposable mirror clone" },
+  { key: "analyze", label: "Analyze history" },
+  { key: "rewrite", label: "Rewrite history" },
+  { key: "verify", label: "Verify payload is gone" },
+];
+const RECOVERY_STEP_ORDER_WITH_PUSH = [
+  ...RECOVERY_STEP_ORDER,
+  { key: "push", label: "Force-push to origin" },
+];
+// Five steps, run in parallel server-side: the blob walk (IOC/padding lines
+// + whole clock-tamper script blobs, done in one pass), the masquerade blob
+// walk, the commit-log walk (camouflage commits), the working-tree
+// VS Code task check, and the historical tasks.json blob walk are all
+// independent, so all five spin at once and each ticks off whenever it
+// actually finishes.
+const RECOVER_ANALYZE_STEP_ORDER = [
+  { key: "blobs", label: "Check IOC / padding-hidden lines and clock-tamper script files" },
+  { key: "masquerade", label: "Check font/image-masquerade blob signatures" },
+  { key: "camouflage", label: "Check for camouflage commits" },
+  { key: "vscode", label: "Check risky VS Code task configuration" },
+  { key: "vscode_history", label: "Check historical tasks.json blobs" },
+];
+
+const recoveryPanel = document.getElementById("recovery-panel");
+const recoverApplySection = document.getElementById("recover-apply-section");
+const recoverAnalyzeResult = document.getElementById("recover-analyze-result");
+const recoverConfirmInput = document.getElementById("recover-confirm-input");
+const recoverPushCheckbox = document.getElementById("recover-push-checkbox");
+const recoverPushFields = document.getElementById("recover-push-fields");
+const recoverPushTokenInput = document.getElementById("recover-push-token");
+const recoverPushConfirmInput = document.getElementById("recover-push-confirm-input");
+const recoverApplyBtn = document.getElementById("recover-apply-btn");
+const recoverRemoveTasksSection = document.getElementById("recover-remove-tasks-section");
+const recoverRemoveTasksConfirmInput = document.getElementById("recover-remove-tasks-confirm-input");
+const recoverRemoveTasksBtn = document.getElementById("recover-remove-tasks-btn");
+const recoverRemoveTasksResult = document.getElementById("recover-remove-tasks-result");
+
+let recoveryScanPath = null;
+
+function showRecoveryPanel(path) {
+  recoveryScanPath = path;
+  recoveryPanel.classList.remove("hidden");
+  recoverApplySection.classList.add("hidden");
+  recoverAnalyzeResult.innerHTML = "";
+  document.getElementById("recover-analyze-progress").innerHTML = "";
+  document.getElementById("recover-analyze-status").textContent = "";
+  document.getElementById("recover-progress").innerHTML = "";
+  document.getElementById("recover-status").textContent = "";
+  document.getElementById("recover-result").innerHTML = "";
+  recoverConfirmInput.value = "";
+  recoverPushCheckbox.checked = false;
+  recoverPushFields.classList.add("hidden");
+  recoverPushTokenInput.value = "";
+  recoverPushConfirmInput.value = "";
+  updateRecoverApplyButton();
+  recoverRemoveTasksSection.classList.add("hidden");
+  recoverRemoveTasksConfirmInput.value = "";
+  recoverRemoveTasksResult.innerHTML = "";
+  updateRecoverRemoveTasksButton();
+}
+
+function hideRecoveryPanel() {
+  recoveryScanPath = null;
+  recoveryPanel.classList.add("hidden");
+}
+
+function updateRecoverApplyButton() {
+  const confirmOk = recoverConfirmInput.value === "REWRITE HISTORY";
+  const pushOk = !recoverPushCheckbox.checked || recoverPushConfirmInput.value === "FORCE PUSH";
+  recoverApplyBtn.disabled = !(confirmOk && pushOk);
+}
+recoverConfirmInput.addEventListener("input", updateRecoverApplyButton);
+recoverPushConfirmInput.addEventListener("input", updateRecoverApplyButton);
+
+function updateRecoverRemoveTasksButton() {
+  recoverRemoveTasksBtn.disabled = recoverRemoveTasksConfirmInput.value !== "REMOVE TASK";
+}
+recoverRemoveTasksConfirmInput.addEventListener("input", updateRecoverRemoveTasksButton);
+
+recoverRemoveTasksBtn.addEventListener("click", async () => {
+  recoverRemoveTasksBtn.disabled = true;
+  recoverRemoveTasksResult.innerHTML = "";
+  try {
+    const resp = await fetch("/api/recover/remove-vscode-tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: recoveryScanPath, confirm: recoverRemoveTasksConfirmInput.value }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      recoverRemoveTasksResult.appendChild(
+        el("div", { class: "summary dirty", text: data.detail || "Failed to remove risky task(s)." })
+      );
+      return;
+    }
+    if (data.edited_count === 0) {
+      recoverRemoveTasksResult.appendChild(
+        el("div", { class: "summary clean", text: "Nothing to remove (no risky tasks found)." })
+      );
+    } else {
+      recoverRemoveTasksResult.appendChild(
+        el("div", {
+          class: "summary clean",
+          text: `Removed risky task(s) from ${data.edited_count} file(s): ${data.edited_files.join(", ")}`,
+        })
+      );
+      recoverRemoveTasksConfirmInput.value = "";
+      recoverRemoveTasksSection.classList.add("hidden");
+      // Re-run analyze so the report above reflects the file as it is now.
+      triggerRecoverAnalyze();
+    }
+  } catch (err) {
+    recoverRemoveTasksResult.appendChild(
+      el("div", { class: "summary dirty", text: String(err.message || err) })
+    );
+  } finally {
+    updateRecoverRemoveTasksButton();
+  }
+});
+recoverPushCheckbox.addEventListener("change", () => {
+  recoverPushFields.classList.toggle("hidden", !recoverPushCheckbox.checked);
+  updateRecoverApplyButton();
+});
+
+function renderRecoverAnalyzeResult(data) {
+  recoverAnalyzeResult.innerHTML = "";
+  const willClean =
+    data.findings_count > 0 ||
+    data.clock_tamper_blobs_count > 0 ||
+    data.masquerade_blobs_count > 0 ||
+    data.vscode_task_blobs_count > 0;
+  if (!willClean) {
+    recoverAnalyzeResult.appendChild(
+      el("div", {
+        class: "summary clean",
+        text:
+          "No IOC/padding/clock-tamper/masquerade/historical-tasks.json matches found in history " +
+          "— nothing to clean.",
+      })
+    );
+  } else {
+    const summary = el("div", { class: "summary dirty" });
+    summary.appendChild(
+      el("strong", {
+        text:
+          `${data.findings_count} matching line(s) across ${data.blobs_affected} blob(s), ` +
+          `plus ${data.clock_tamper_blobs_count} whole clock-tamper script blob(s), ` +
+          `${data.masquerade_blobs_count} confirmed masquerade blob(s), and ` +
+          `${data.vscode_task_blobs_count} historical risky tasks.json blob(s)`,
+      })
+    );
+    recoverAnalyzeResult.appendChild(summary);
+
+    if (data.preview.length) {
+      const box = el("div", { class: "scanner" });
+      box.appendChild(el("h2", { text: "Lines that would be stripped" }));
+      for (const p of data.preview) {
+        box.appendChild(
+          el("div", { class: "finding", text: `blob ${p.blob} line ${p.line}: ${JSON.stringify(p.text)}` })
+        );
+      }
+      if (data.truncated) {
+        box.appendChild(el("div", { class: "finding", text: "... and more (showing first 20)" }));
+      }
+      recoverAnalyzeResult.appendChild(box);
+    }
+
+    if (data.clock_tamper_preview.length) {
+      const box = el("div", { class: "scanner" });
+      box.appendChild(el("h2", { text: "Whole files that would be blanked (clock-tamper scripts)" }));
+      for (const p of data.clock_tamper_preview) {
+        box.appendChild(
+          el("div", { class: "finding", text: `blob ${p.blob}: ${p.indicators.join("; ")}` })
+        );
+      }
+      recoverAnalyzeResult.appendChild(box);
+    }
+
+    if (data.masquerade_blobs.length) {
+      const box = el("div", { class: "scanner" });
+      box.appendChild(el("h2", { text: "Whole files that would be blanked (confirmed masquerade)" }));
+      for (const p of data.masquerade_blobs) {
+        box.appendChild(el("div", { class: "finding", text: `blob ${p.blob}: ${p.path}` }));
+      }
+      if (data.masquerade_blobs.length === 20) {
+        box.appendChild(el("div", { class: "finding", text: "... and possibly more (showing first 20)" }));
+      }
+      recoverAnalyzeResult.appendChild(box);
+    }
+
+    if (data.vscode_task_blobs.length) {
+      const box = el("div", { class: "scanner" });
+      box.appendChild(el("h2", { text: "Whole files that would be blanked (historical risky tasks.json)" }));
+      for (const p of data.vscode_task_blobs) {
+        box.appendChild(el("div", { class: "finding", text: `blob ${p.blob}: ${p.path}` }));
+      }
+      if (data.vscode_task_blobs.length === 20) {
+        box.appendChild(el("div", { class: "finding", text: "... and possibly more (showing first 20)" }));
+      }
+      box.appendChild(
+        el("div", {
+          class: "finding",
+          text:
+            "Covers every past commit, not just the current tree -- so a risky tasks.json that was " +
+            "already fixed on the tip but is still recoverable from an older commit gets caught here too.",
+        })
+      );
+      recoverAnalyzeResult.appendChild(box);
+    }
+  }
+
+  if (data.camouflage_commits_count > 0) {
+    const box = el("div", { class: "scanner" });
+    box.appendChild(
+      el("h2", { text: `Camouflage commits found — review manually (${data.camouflage_commits_count})` })
+    );
+    for (const c of data.camouflage_commits) {
+      box.appendChild(
+        el("div", {
+          class: "finding",
+          text:
+            `${c.commit} — ${c.subject} (${c.files_changed} files; ` +
+            `new: ${c.suspicious_new_files.join(", ")})`,
+        })
+      );
+    }
+    box.appendChild(
+      el("div", {
+        class: "finding",
+        text:
+          "Not auto-rewritten — which specific files in a mass-touch commit deserve removal is a " +
+          "judgment call. Their content is stripped/blanked above if it also matched a known pattern.",
+      })
+    );
+    recoverAnalyzeResult.appendChild(box);
+  }
+
+  if (data.vscode_tasks_count > 0) {
+    const box = el("div", { class: "scanner" });
+    box.appendChild(
+      el("h2", { text: `Risky VS Code tasks found (${data.vscode_tasks_count})` })
+    );
+    for (const t of data.vscode_tasks) {
+      box.appendChild(
+        el("div", {
+          class: "finding",
+          text: `${t.file} task '${t.task_label}' [${t.severity}]: ${t.reasons.join("; ")}`,
+        })
+      );
+    }
+    box.appendChild(
+      el("div", {
+        class: "finding",
+        text:
+          "This is about the current, live working-tree file, so it's not fixed by \"Rewrite history\" " +
+          "above -- use \"Remove risky task(s)\" below for it. If this same risky task was ever " +
+          "committed in the past, those older blobs are covered separately above, under " +
+          "\"historical risky tasks.json\".",
+      })
+    );
+    recoverAnalyzeResult.appendChild(box);
+  }
+  recoverRemoveTasksSection.classList.toggle("hidden", data.vscode_tasks_count === 0);
+  recoverRemoveTasksConfirmInput.value = "";
+  recoverRemoveTasksResult.innerHTML = "";
+  updateRecoverRemoveTasksButton();
+
+  recoverApplySection.classList.toggle("hidden", !willClean);
+}
+
+function handleRecoverAnalyzeSSELine(raw, status, result) {
+  const eventMatch = /^event: (.+)$/m.exec(raw);
+  const dataMatch = /^data: (.+)$/m.exec(raw);
+  if (!dataMatch) return;
+  const eventName = eventMatch ? eventMatch[1] : "message";
+  const data = JSON.parse(dataMatch[1]);
+
+  if (eventName === "progress") {
+    setStep("recover-analyze-step", data.step, { state: data.done ? "done" : "running", label: data.label });
+    status.textContent = data.label;
+  } else if (eventName === "done") {
+    status.textContent = "";
+    renderRecoverAnalyzeResult(data);
+  } else if (eventName === "error") {
+    showError("recover-analyze-step", RECOVER_ANALYZE_STEP_ORDER, result, status, data.message);
+  }
+}
+
+async function triggerRecoverAnalyze() {
+  const btn = document.getElementById("recover-analyze-btn");
+  const status = document.getElementById("recover-analyze-status");
+
+  btn.disabled = true;
+  status.textContent = "Starting...";
+  recoverAnalyzeResult.innerHTML = "";
+  renderProgressSkeleton("recover-analyze-progress", "recover-analyze-step", RECOVER_ANALYZE_STEP_ORDER);
+
+  try {
+    await streamSSE("/api/recover/analyze/stream", { path: recoveryScanPath }, (raw) =>
+      handleRecoverAnalyzeSSELine(raw, status, recoverAnalyzeResult)
+    );
+  } catch (err) {
+    showError("recover-analyze-step", RECOVER_ANALYZE_STEP_ORDER, recoverAnalyzeResult, status, String(err.message || err));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("recover-analyze-btn").addEventListener("click", triggerRecoverAnalyze);
+
+function handleRecoverySSELine(raw, status, result, stepOrder) {
+  const eventMatch = /^event: (.+)$/m.exec(raw);
+  const dataMatch = /^data: (.+)$/m.exec(raw);
+  if (!dataMatch) return;
+  const eventName = eventMatch ? eventMatch[1] : "message";
+  const data = JSON.parse(dataMatch[1]);
+
+  if (eventName === "progress") {
+    setStep("recover-step", data.step, { state: data.done ? "done" : "running", label: data.label });
+    status.textContent = data.label;
+  } else if (eventName === "done") {
+    if (!data.cleaned) {
+      status.textContent = "Nothing to clean.";
+      return;
+    }
+    status.textContent = data.pushed ? "History rewritten and pushed." : "History rewritten (not pushed).";
+    const summary = el("div", { class: "summary clean" });
+    summary.appendChild(
+      el("strong", {
+        text:
+          `Stripped ${data.findings_before} line(s) across ${data.blobs_affected} blob(s), ` +
+          `blanked ${data.clock_tamper_blobs} whole clock-tamper script blob(s), ` +
+          `${data.masquerade_blobs} confirmed masquerade blob(s), and ` +
+          `${data.vscode_task_blobs} historical risky tasks.json blob(s)`,
+      })
+    );
+    if (data.pushed) {
+      summary.appendChild(
+        el("div", { class: "loc", text: `Force-pushed to ${data.origin_url}. Collaborators need to re-clone.` })
+      );
+    } else {
+      summary.appendChild(
+        el("div", {
+          class: "loc",
+          text: "Not pushed — the rewritten copy was disposable and has now been deleted. Re-run with force-push enabled to publish it.",
+        })
+      );
+    }
+    result.appendChild(summary);
+  } else if (eventName === "error") {
+    showError("recover-step", stepOrder, result, status, data.message);
+  }
+}
+
+recoverApplyBtn.addEventListener("click", async () => {
+  const status = document.getElementById("recover-status");
+  const result = document.getElementById("recover-result");
+  const push = recoverPushCheckbox.checked;
+
+  const payload = { path: recoveryScanPath, confirm: recoverConfirmInput.value, push };
+  if (push) {
+    payload.push_confirm = recoverPushConfirmInput.value;
+    const token = recoverPushTokenInput.value.trim();
+    if (token) payload.token = token;
+  }
+
+  const stepOrder = push ? RECOVERY_STEP_ORDER_WITH_PUSH : RECOVERY_STEP_ORDER;
+
+  recoverApplyBtn.disabled = true;
+  status.textContent = "Starting...";
+  result.innerHTML = "";
+  renderProgressSkeleton("recover-progress", "recover-step", stepOrder);
+
+  try {
+    await streamSSE("/api/recover/apply/stream", payload, (raw) =>
+      handleRecoverySSELine(raw, status, result, stepOrder)
+    );
+  } catch (err) {
+    showError("recover-step", stepOrder, result, status, String(err.message || err));
+  } finally {
+    updateRecoverApplyButton();
+  }
+});
+
+// --- file viewer ------------------------------------------------------
+const fileViewerModal = document.getElementById("file-viewer-modal");
+const fileViewerPathEl = document.getElementById("file-viewer-path");
+const fileViewerBody = document.getElementById("file-viewer-body");
+
+function renderFileViewerContent(content, targetLine) {
+  fileViewerBody.innerHTML = "";
+  const pre = document.createElement("pre");
+
+  const lines = content.split("\n");
+  const idx = targetLine ? targetLine - 1 : -1;
+  if (idx >= 0 && idx < lines.length) {
+    const before = lines.slice(0, idx).join("\n");
+    const after = lines.slice(idx + 1).join("\n");
+    if (before) pre.appendChild(document.createTextNode(before + "\n"));
+    const mark = el("span", { class: "file-viewer-highlight", id: "file-viewer-target-line", text: lines[idx] });
+    pre.appendChild(mark);
+    if (after) pre.appendChild(document.createTextNode("\n" + after));
+  } else {
+    pre.textContent = content;
+  }
+
+  fileViewerBody.appendChild(pre);
+
+  const markEl = document.getElementById("file-viewer-target-line");
+  if (markEl) markEl.scrollIntoView({ block: "center" });
+}
+
+async function openFileViewer(repoPath, filePath, line) {
+  fileViewerPathEl.textContent = filePath + (line ? ` (line ${line})` : "");
+  fileViewerBody.innerHTML = "";
+  fileViewerBody.appendChild(el("div", { class: "hint", text: "Loading..." }));
+  fileViewerModal.classList.remove("hidden");
+
+  try {
+    const qs = new URLSearchParams({ path: repoPath, file: filePath });
+    const resp = await fetch(`/api/file?${qs.toString()}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    fileViewerBody.innerHTML = "";
+    if (data.binary) {
+      fileViewerBody.appendChild(el("div", { class: "hint", text: `Binary file (${data.size} bytes) — not shown.` }));
+      return;
+    }
+    renderFileViewerContent(data.content, line);
+    if (data.truncated) {
+      fileViewerBody.appendChild(
+        el("div", { class: "hint", text: `Truncated — showing the first part of a ${data.size}-byte file.` })
+      );
+    }
+  } catch (err) {
+    fileViewerBody.innerHTML = "";
+    fileViewerBody.appendChild(el("div", { class: "error", text: String(err.message || err) }));
+  }
+}
+
+document.getElementById("file-viewer-close-btn").addEventListener("click", () => {
+  fileViewerModal.classList.add("hidden");
+});
+fileViewerModal.addEventListener("click", (e) => {
+  if (e.target === fileViewerModal) fileViewerModal.classList.add("hidden");
+});
+</script>
+</body>
+</html>

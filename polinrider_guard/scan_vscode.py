@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import allowlist
+
 SUSPICIOUS_RUN_TARGET = re.compile(
     r"\b(node|python3?|ruby|perl|php|bash|sh|powershell|pwsh)\b[^\n]*"
     r"\.(woff2?|ttf|otf|eot|png|jpe?g|gif|ico|webp|bmp|wasm|pdf|zip)\b",
@@ -26,11 +28,13 @@ INTERPRETER_PATTERN = re.compile(
 )
 
 
-def _strip_jsonc_comments(text: str) -> str:
+def strip_jsonc_comments(text: str) -> str:
     """Strip // and /* */ comments so tasks.json (JSONC) parses as JSON.
 
     Not a full tokenizer, but good enough for tasks.json: it respects string
     literals so it won't eat a `//` that appears inside a command string.
+    Public (no leading underscore) so polinrider_guard/recovery.py can reuse
+    it to parse tasks.json the same way when editing out a risky task.
     """
     out = []
     i = 0
@@ -144,41 +148,58 @@ def _evaluate_task(task: dict) -> VscodeFinding | None:
     )
 
 
-def scan_tasks_file(path: Path, root: Path) -> list[VscodeFinding]:
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, PermissionError):
-        return []
+def evaluate_tasks_json(text: str) -> list[VscodeFinding]:
+    """Parse JSONC tasks-file text and return a finding for each risky task,
+    with `file` left empty for the caller to fill in (or leave blank).
 
+    Public (no leading underscore) so polinrider_guard/recovery.py can reuse
+    it against historical blob content pulled from git history -- which has
+    no filesystem Path to read -- instead of only working with a file on
+    disk the way scan_tasks_file() below does.
+    """
     try:
-        data = json.loads(_strip_jsonc_comments(raw))
+        data = json.loads(strip_jsonc_comments(text))
     except json.JSONDecodeError:
         return []
 
     tasks = data.get("tasks", []) if isinstance(data, dict) else []
-    rel = str(path.relative_to(root))
     findings: list[VscodeFinding] = []
     for task in tasks:
         if not isinstance(task, dict):
             continue
         finding = _evaluate_task(task)
         if finding:
-            finding.file = rel
             findings.append(finding)
+    return findings
+
+
+def scan_tasks_file(path: Path, root: Path) -> list[VscodeFinding]:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return []
+
+    rel = str(path.relative_to(root))
+    findings = evaluate_tasks_json(raw)
+    for finding in findings:
+        finding.file = rel
     return findings
 
 
 def scan_path(target: str | os.PathLike) -> list[VscodeFinding]:
     root = Path(target).resolve()
-    if root.is_file():
-        return scan_tasks_file(root, root.parent)
+    entries = allowlist.load_allowlist(root)
 
-    findings: list[VscodeFinding] = []
-    for tasks_file in root.rglob(".vscode/tasks.json"):
-        if "node_modules" in tasks_file.parts:
-            continue
-        findings.extend(scan_tasks_file(tasks_file, root))
-    return findings
+    if root.is_file():
+        findings = scan_tasks_file(root, root.parent)
+    else:
+        findings = []
+        for tasks_file in root.rglob(".vscode/tasks.json"):
+            if "node_modules" in tasks_file.parts:
+                continue
+            findings.extend(scan_tasks_file(tasks_file, root))
+
+    return [f for f in findings if not allowlist.is_file_allowlisted(entries, "vscode_tasks", f.file)]
 
 
 def main(argv: list[str] | None = None) -> int:

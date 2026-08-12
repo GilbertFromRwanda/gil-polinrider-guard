@@ -16,7 +16,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-SKIP_DIR_NAMES = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__"}
+from . import allowlist
+from .skip_lists import SKIP_DIR_NAMES
 
 # extension -> (label, magic byte signatures). A file matches if it starts
 # with ANY of the listed signatures for its own extension family.
@@ -25,7 +26,6 @@ MAGIC_SIGNATURES: dict[str, tuple[str, list[bytes]]] = {
     ".woff": ("font/woff", [b"wOFF"]),
     ".ttf": ("font/ttf", [b"\x00\x01\x00\x00", b"true", b"OTTO"]),
     ".otf": ("font/otf", [b"OTTO", b"\x00\x01\x00\x00"]),
-    ".eot": ("font/eot", [b"\x00\x00\x01\x00", b"\x02\x00\x02\x00"]),
     ".png": ("image/png", [b"\x89PNG\r\n\x1a\n"]),
     ".jpg": ("image/jpeg", [b"\xff\xd8\xff"]),
     ".jpeg": ("image/jpeg", [b"\xff\xd8\xff"]),
@@ -39,14 +39,41 @@ MAGIC_SIGNATURES: dict[str, tuple[str, list[bytes]]] = {
     ".gz": ("application/gzip", [b"\x1f\x8b"]),
 }
 
+# extension -> (label, byte offset, signatures) for formats whose magic
+# isn't at the very start of the file. EOT's own spec puts a fixed "LP"
+# marker at offset 34 -- offset 0 is actually EOTSize, a little-endian
+# total-file-size field that varies per file, so checking it with
+# startswith() (as MAGIC_SIGNATURES does) flags every legitimate .eot file.
+OFFSET_MAGIC_SIGNATURES: dict[str, tuple[str, int, list[bytes]]] = {
+    ".eot": ("font/eot", 34, [b"LP"]),
+}
+
 # Every extension we're willing to say "this should be a binary asset" about.
-BINARY_LIKE_EXTENSIONS = set(MAGIC_SIGNATURES)
+BINARY_LIKE_EXTENSIONS = set(MAGIC_SIGNATURES) | set(OFFSET_MAGIC_SIGNATURES)
 
 # Heuristics for "this content is actually JS/text, not a binary asset".
-_JS_KEYWORDS = re.compile(
+# Public (no leading underscore) so polinrider_guard/recovery.py can reuse
+# the exact same high-confidence signal to identify which historical blobs
+# are safe to blank entirely during history surgery -- see its
+# find_masquerade_blobs().
+JS_KEYWORDS = re.compile(
     rb"\b(function|require|module\.exports|eval|const|let|var|=>|process\.env|Buffer\.from|import\s)\b"
 )
 _PRINTABLE = re.compile(rb"[\x09\x0a\x0d\x20-\x7e]")
+
+
+def magic_bytes_match(ext: str, head: bytes) -> bool:
+    """True if `head` (a file/blob's leading bytes) starts with (or, for
+    formats like .eot whose marker isn't at offset 0, contains at the right
+    offset) a magic-byte signature consistent with its claimed extension.
+    Public so recovery.py can apply the identical check to blob content
+    pulled from git history instead of a file on disk.
+    """
+    if ext in OFFSET_MAGIC_SIGNATURES:
+        _label, offset, signatures = OFFSET_MAGIC_SIGNATURES[ext]
+        return any(head[offset : offset + len(sig)] == sig for sig in signatures)
+    _label, signatures = MAGIC_SIGNATURES[ext]
+    return any(head.startswith(sig) for sig in signatures)
 
 
 def shannon_entropy(data: bytes) -> float:
@@ -104,19 +131,19 @@ def _iter_candidate_files(root: Path):
 
 def check_file(path: Path, root: Path, deep: bool = True) -> MasqueradeFinding | None:
     ext = path.suffix.lower()
-    label, signatures = MAGIC_SIGNATURES[ext]
     try:
         head = path.read_bytes()[:512]
     except (OSError, PermissionError):
         return None
 
     rel = str(path.relative_to(root))
+    label = (OFFSET_MAGIC_SIGNATURES[ext][0] if ext in OFFSET_MAGIC_SIGNATURES else MAGIC_SIGNATURES[ext][0])
 
-    if any(head.startswith(sig) for sig in signatures):
+    if magic_bytes_match(ext, head):
         return None  # magic bytes match the claimed type -- looks legitimate
 
     # Magic bytes did not match. Figure out what it actually looks like.
-    if _JS_KEYWORDS.search(head):
+    if JS_KEYWORDS.search(head):
         return MasqueradeFinding(
             file=rel,
             claimed_extension=ext,
@@ -155,14 +182,18 @@ def check_file(path: Path, root: Path, deep: bool = True) -> MasqueradeFinding |
 
 def scan_path(target: str | os.PathLike, deep: bool = True) -> list[MasqueradeFinding]:
     root = Path(target).resolve()
+    entries = allowlist.load_allowlist(root)
+
     if root.is_file():
         finding = check_file(root, root.parent, deep=deep) if root.suffix.lower() in BINARY_LIKE_EXTENSIONS else None
+        if finding and allowlist.is_file_allowlisted(entries, "extension_masquerade", finding.file):
+            finding = None
         return [finding] if finding else []
 
     findings: list[MasqueradeFinding] = []
     for path in _iter_candidate_files(root):
         finding = check_file(path, root, deep=deep)
-        if finding:
+        if finding and not allowlist.is_file_allowlisted(entries, "extension_masquerade", finding.file):
             findings.append(finding)
     return findings
 
