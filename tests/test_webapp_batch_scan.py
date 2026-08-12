@@ -200,6 +200,40 @@ def test_batch_scan_stream_emits_discover_and_repo_progress(tmp_path, client):
     assert any(d.get("done") for d in repo_events)
 
 
+def test_batch_scan_stream_emits_started_before_finished_per_repo(tmp_path, client):
+    # Regression test: a repo's row must flip to a "running" state the
+    # moment a worker actually picks it up, not just jump straight from
+    # pending to done -- otherwise a repo that's genuinely in progress
+    # looks identical to one still waiting in the queue.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("repo-a", "repo-b"):
+        repo = workspace / name
+        _init_repo(repo)
+        (repo / "a.txt").write_text("hi\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-q", "-m", "init")
+
+    resp = client.post("/api/batch-scan/stream", json={"path": str(workspace)})
+    assert resp.status_code == 200
+    events = _collect_sse(resp)
+
+    repo_events = [d for e, d in events if e == "progress" and d.get("step") == "repo"]
+    started = [d for d in repo_events if "done" not in d]
+    finished = [d for d in repo_events if d.get("done")]
+
+    assert {d["repo_path"] for d in started} == {str((workspace / "repo-a").resolve()), str((workspace / "repo-b").resolve())}
+    assert {d["repo_path"] for d in finished} == {str((workspace / "repo-a").resolve()), str((workspace / "repo-b").resolve())}
+
+    # Each repo's own "started" must precede its own "finished" in stream order.
+    order = [(d["step"], d["repo_path"], "done" in d) for d in repo_events]
+    for repo_path in {str((workspace / "repo-a").resolve()), str((workspace / "repo-b").resolve())}:
+        indices = [i for i, (_, p, is_done) in enumerate(order) if p == repo_path]
+        started_idx = next(i for i in indices if not order[i][2])
+        finished_idx = next(i for i in indices if order[i][2])
+        assert started_idx < finished_idx
+
+
 # --- --batch-workers CLI flag -------------------------------------------------
 
 

@@ -836,7 +836,11 @@ function handleBatchSSELine(raw, status, results) {
       }
     } else if (data.step === "repo") {
       const key = batchRepoPathToStepKey[data.repo_path];
-      if (key) setStep("batch-step", key, { state: data.error ? "error" : "done", label: data.label });
+      // No "done" yet means this repo's worker just picked it up (as
+      // opposed to a repo that's still queued behind BATCH_SCAN_MAX_WORKERS
+      // others and hasn't started at all, which stays "pending" until then).
+      const state = !data.done ? "running" : data.error ? "error" : "done";
+      if (key) setStep("batch-step", key, { state, label: data.label });
       status.textContent = data.label;
     }
   } else if (eventName === "done") {

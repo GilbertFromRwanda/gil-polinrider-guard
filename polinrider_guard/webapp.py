@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import os
+import queue
 import re
 import shutil
 import stat
@@ -244,7 +245,9 @@ def _validate_batch_scan_path(path: str) -> Path:
 def _run_batch_scan(root: Path) -> Generator[tuple[str, dict], None, None]:
     """Discover every git repo under `root`, then scan each one with the
     same run_guard() pipeline the CLI and single-repo web scan use,
-    streaming progress as each repo finishes.
+    streaming a "started" progress event the moment a repo's scan actually
+    begins and a "done" one when it finishes, so the UI can show which
+    repos are queued vs genuinely in flight right now.
 
     Repos are scanned with bounded concurrency (BATCH_SCAN_MAX_WORKERS)
     rather than unbounded, since each repo's own scan already runs its six
@@ -277,39 +280,67 @@ def _run_batch_scan(root: Path) -> Generator[tuple[str, dict], None, None]:
         {"step": "discover", "label": discover_label, "done": True, "repos": repo_list, "truncated": truncated},
     )
 
+    # A plain ThreadPoolExecutor + as_completed() only ever tells you when a
+    # task *finishes* -- there's no hook for "a worker just picked this one
+    # up". With more repos than BATCH_SCAN_MAX_WORKERS, that means every
+    # queued-but-not-yet-running repo would sit visually identical to one
+    # that's actively being scanned, right up until it's suddenly done.
+    # Routing progress through a thread-safe queue instead lets each worker
+    # report "started" the moment it actually begins, so the UI can show a
+    # spinner only for repos genuinely in flight right now.
+    event_queue: queue.Queue = queue.Queue()
+
+    def _scan_one(repo_path: Path) -> None:
+        event_queue.put(("started", repo_path, None))
+        try:
+            report = guard.run_guard(repo_path, include_git=True)
+        except Exception as exc:
+            event_queue.put(("error", repo_path, exc))
+            return
+        event_queue.put(("finished", repo_path, report))
+
     reports: list[dict] = []
     with ThreadPoolExecutor(max_workers=BATCH_SCAN_MAX_WORKERS) as executor:
-        futures = {executor.submit(guard.run_guard, p, include_git=True): p for p in discovered}
-        for future in as_completed(futures):
-            repo_path = futures[future]
-            try:
-                report = future.result()
-            except Exception as exc:
+        for p in discovered:
+            executor.submit(_scan_one, p)
+
+        remaining = len(discovered)
+        while remaining > 0:
+            kind, repo_path, payload = event_queue.get()
+            if kind == "started":
+                yield (
+                    "progress",
+                    {"step": "repo", "repo_path": str(repo_path), "label": f"{repo_path.name}: scanning..."},
+                )
+            elif kind == "error":
+                remaining -= 1
                 yield (
                     "progress",
                     {
                         "step": "repo",
                         "repo_path": str(repo_path),
-                        "label": f"{repo_path.name}: scan failed ({exc})",
+                        "label": f"{repo_path.name}: scan failed ({payload})",
                         "done": True,
                         "error": True,
                     },
                 )
-                continue
-            report["source_path"] = str(repo_path)
-            reports.append(report)
-            total = report["summary"]["total_findings"]
-            yield (
-                "progress",
-                {
-                    "step": "repo",
-                    "repo_path": str(repo_path),
-                    "label": f"{repo_path.name}: {total} finding(s)",
-                    "done": True,
-                    "findings_count": total,
-                    "by_severity": report["summary"]["by_severity"],
-                },
-            )
+            else:  # "finished"
+                remaining -= 1
+                report = payload
+                report["source_path"] = str(repo_path)
+                reports.append(report)
+                total = report["summary"]["total_findings"]
+                yield (
+                    "progress",
+                    {
+                        "step": "repo",
+                        "repo_path": str(repo_path),
+                        "label": f"{repo_path.name}: {total} finding(s)",
+                        "done": True,
+                        "findings_count": total,
+                        "by_severity": report["summary"]["by_severity"],
+                    },
+                )
 
     reports.sort(key=lambda r: r["source_path"])
     total_findings = sum(r["summary"]["total_findings"] for r in reports)
