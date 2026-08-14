@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir git-filter-repo
+    && pip install --no-cache-dir --root-user-action=ignore git-filter-repo
 
 WORKDIR /app
 
@@ -19,7 +19,7 @@ COPY polinrider_guard/ ./polinrider_guard/
 COPY scripts/ ./scripts/
 COPY rules/ ./rules/
 
-RUN pip install --no-cache-dir ".[web]"
+RUN pip install --no-cache-dir --root-user-action=ignore ".[web]"
 
 # Mount the repo to scan at /scan, e.g.:
 #   docker run --rm -v /path/to/repo:/scan polinrider-guard /scan

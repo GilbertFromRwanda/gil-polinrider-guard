@@ -33,6 +33,8 @@ import stat
 import subprocess
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Generator, Iterator
@@ -107,6 +109,33 @@ def _run_one_scanner(
 # Deliberately rejects bare filesystem paths and file:// here -- that's what
 # the separate `path` field is for, with its own explicit handling below.
 _ALLOWED_URL_RE = re.compile(r"^(https?://|git://|ssh://|git@[\w.-]+:)", re.IGNORECASE)
+
+_GITHUB_HOSTS = {"github.com", "www.github.com"}
+_GITHUB_API_BASE = "https://api.github.com"
+
+
+def _parse_github_org_root(url: str) -> str | None:
+    """Return the GitHub org/user login if `url` is a bare account root
+    (no specific repo) on github.com -- e.g. https://github.com/SomeOrg or
+    git@github.com:SomeOrg -- so the caller can route it to an org-wide
+    scan instead of trying to clone it as a single repo. None for a
+    specific-repo URL (owner/repo) or any other host; org-wide scanning is
+    GitHub-only for now, the same restriction _list_github_repos has.
+    """
+    stripped = url.strip().rstrip("/")
+    if stripped.lower().startswith("git@"):
+        host, _, path = stripped[len("git@"):].partition(":")
+    else:
+        parts = urlsplit(stripped)
+        host = parts.hostname or ""
+        path = parts.path.lstrip("/")
+    if host.lower() not in _GITHUB_HOSTS:
+        return None
+    if path.lower().endswith(".git"):
+        path = path[:-4]
+    segments = [s for s in path.split("/") if s]
+    return segments[0] if len(segments) == 1 else None
+
 
 _AUTH_ERROR_MARKERS = (
     "authentication failed",
@@ -415,6 +444,12 @@ def _run_batch_scan(root: Path, scanners: list[str] | None = None) -> Generator[
                         "done": True,
                         "findings_count": total,
                         "by_severity": report["summary"]["by_severity"],
+                        # Full report, not just the count/severity summary
+                        # above -- lets the web UI render this repo's
+                        # findings (and offer Retry on a failed one) the
+                        # moment it finishes, instead of only after every
+                        # other repo in the run has too.
+                        "report": report,
                     },
                 )
 
@@ -453,6 +488,258 @@ def batch_scan_stream(req: BatchScanRequest) -> StreamingResponse:
 
     def generate():
         for event, data in _run_batch_scan(root, req.scanners):
+            yield _sse(event, data)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# GitHub-org counterpart to the local "scan all repos under this path"
+# feature above: instead of walking a folder of already-cloned repos, it
+# lists every repo under a GitHub org or user account via the REST API,
+# then clones/scans/discards each one in turn. See _run_org_scan's
+# docstring for why clones are ephemeral here rather than kept like a
+# single URL scan's.
+def _github_api_get(path: str, token: str | None) -> list | dict:
+    req = urllib.request.Request(f"{_GITHUB_API_BASE}{path}")
+    req.add_header("Accept", "application/vnd.github+json")
+    # GitHub's API rejects requests with no User-Agent (403), and urllib
+    # doesn't send one by default the way a browser or curl would.
+    req.add_header("User-Agent", "polinrider-guard-web")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return jsonlib.loads(resp.read())
+
+
+def _list_github_repos(login: str, token: str | None) -> list[dict]:
+    """List every repo (as GitHub's API repo objects) under a GitHub org or
+    user account, trying the org endpoint first and falling back to the
+    user endpoint -- a bare account-root URL can't tell the two apart
+    without asking. Paginated at 100/page, capped at MAX_BATCH_REPOS total,
+    same bound and reasoning as the local batch-scan feature: a sane bound
+    on dashboard row count / SSE payload size / total clone time.
+    """
+    for kind in ("orgs", "users"):
+        repos: list[dict] = []
+        page = 1
+        try:
+            while len(repos) < MAX_BATCH_REPOS:
+                batch = _github_api_get(f"/{kind}/{login}/repos?per_page=100&page={page}", token)
+                if not batch:
+                    break
+                repos.extend(batch)
+                if len(batch) < 100:
+                    break
+                page += 1
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                continue  # not an org under this login -- try the user endpoint next
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise HTTPException(exc.code, f"GitHub API error listing {kind}/{login}: {detail}")
+        except urllib.error.URLError as exc:
+            raise HTTPException(502, f"could not reach the GitHub API: {exc.reason}")
+        else:
+            return repos[:MAX_BATCH_REPOS]
+    raise HTTPException(
+        404,
+        f"no GitHub org or user account named '{login}' -- or it's private and needs an access token",
+    )
+
+
+class OrgScanRequest(BaseModel):
+    org: str
+    token: str | None = None
+    scanners: list[str] | None = None
+
+
+def _run_org_scan(login: str, token: str | None, scanners: list[str] | None = None) -> Generator[tuple[str, dict], None, None]:
+    """List every repo under a GitHub org/user account, then clone, scan,
+    and immediately discard each one in turn (bounded concurrency, same
+    BATCH_SCAN_MAX_WORKERS as _run_batch_scan). Clones are ephemeral rather
+    than kept around like a single URL scan's _last_scan_clone: an org can
+    be arbitrarily large, and there's no single "most recent" slot to reuse
+    the way one repo has. Emits the identical event shape _run_batch_scan
+    does (progress/discover with repos+truncated, progress/repo, done)
+    so the web UI's existing batch-dashboard renderer works on it
+    unmodified. Per-repo reports have no source_path (their clone is gone
+    by the time the browser sees them) -- the file viewer/Recovery/"Open in
+    folder" actions on one naturally fail with an honest "path does not
+    exist" error rather than needing special-casing in the UI for it.
+    """
+    yield ("progress", {"step": "discover", "label": f"Listing repositories for {login}..."})
+
+    try:
+        all_repos = _list_github_repos(login, token)
+    except HTTPException as exc:
+        yield ("error", {"message": exc.detail})
+        return
+
+    truncated = len(all_repos) >= MAX_BATCH_REPOS
+    repo_list = [{"path": r["clone_url"], "name": r["full_name"]} for r in all_repos]
+    discover_label = f"Found {len(all_repos)} repositor{'y' if len(all_repos) == 1 else 'ies'}"
+    if truncated:
+        discover_label += f" (showing first {MAX_BATCH_REPOS})"
+    yield (
+        "progress",
+        {"step": "discover", "label": discover_label, "done": True, "repos": repo_list, "truncated": truncated},
+    )
+
+    if not all_repos:
+        yield (
+            "done",
+            {"root": login, "repos": [], "total_repos": 0, "dirty_repos": 0, "total_findings": 0, "truncated": False},
+        )
+        return
+
+    event_queue: queue.Queue = queue.Queue()
+
+    def _scan_one(repo: dict) -> None:
+        clone_url = repo["clone_url"]
+        event_queue.put(("started", clone_url, None))
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="polinrider-guard-org-"))
+        try:
+            clone_target = _inject_token(clone_url, token) if token else clone_url
+            env = os.environ.copy()
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            clone_result = subprocess.run(
+                ["git", "clone", clone_target, str(tmpdir)],
+                capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECONDS, env=env,
+            )
+            if clone_result.returncode != 0:
+                stderr = clone_result.stderr.strip()[-500:]
+                if token:
+                    stderr = stderr.replace(clone_target, clone_url).replace(token, "***")
+                event_queue.put(("error", clone_url, f"clone failed: {stderr}"))
+                return
+
+            progress_lock = threading.Lock()
+            scanner_totals: dict[str, int] = {}
+            scanner_done: dict[str, int] = {}
+
+            def on_progress(scanner_key: str, done: int, total: int) -> None:
+                with progress_lock:
+                    scanner_totals[scanner_key] = total
+                    scanner_done[scanner_key] = done
+                    agg_done = sum(scanner_done.values())
+                    agg_total = sum(scanner_totals.values())
+                event_queue.put(("repo_progress", clone_url, (agg_done, agg_total)))
+
+            report = guard.run_guard(tmpdir, include_git=True, scanners=scanners, on_progress=on_progress)
+        except subprocess.TimeoutExpired:
+            event_queue.put(("error", clone_url, "clone timed out"))
+            return
+        except Exception as exc:
+            event_queue.put(("error", clone_url, str(exc)))
+            return
+        finally:
+            _rmtree_force(tmpdir)
+
+        report["source_url"] = clone_url
+        report["repo_name"] = repo["full_name"]
+        event_queue.put(("finished", clone_url, report))
+
+    reports: list[dict] = []
+    with ThreadPoolExecutor(max_workers=BATCH_SCAN_MAX_WORKERS) as executor:
+        for r in all_repos:
+            executor.submit(_scan_one, r)
+
+        remaining = len(all_repos)
+        while remaining > 0:
+            kind, clone_url, payload = event_queue.get()
+            if kind == "started":
+                yield ("progress", {"step": "repo", "repo_path": clone_url, "label": f"{clone_url}: scanning..."})
+            elif kind == "repo_progress":
+                done, total = payload
+                yield (
+                    "progress",
+                    {
+                        "step": "repo",
+                        "repo_path": clone_url,
+                        "label": f"{clone_url}: {done}/{total} files scanned",
+                        "file_progress": {"done": done, "total": total},
+                    },
+                )
+            elif kind == "error":
+                remaining -= 1
+                yield (
+                    "progress",
+                    {
+                        "step": "repo",
+                        "repo_path": clone_url,
+                        "label": f"{clone_url}: scan failed ({payload})",
+                        "done": True,
+                        "error": True,
+                    },
+                )
+            else:  # "finished"
+                remaining -= 1
+                report = payload
+                reports.append(report)
+                total = report["summary"]["total_findings"]
+                yield (
+                    "progress",
+                    {
+                        "step": "repo",
+                        "repo_path": clone_url,
+                        "label": f"{report['repo_name']}: {total} finding(s)",
+                        "done": True,
+                        "findings_count": total,
+                        "by_severity": report["summary"]["by_severity"],
+                        # See _run_batch_scan's identical field for why.
+                        "report": report,
+                    },
+                )
+
+    reports.sort(key=lambda r: r.get("repo_name", r.get("source_url", "")))
+    total_findings = sum(r["summary"]["total_findings"] for r in reports)
+    dirty_repos = sum(1 for r in reports if r["summary"]["total_findings"] > 0)
+    yield (
+        "done",
+        {
+            "root": login,
+            "repos": reports,
+            "total_repos": len(reports),
+            "dirty_repos": dirty_repos,
+            "total_findings": total_findings,
+            "truncated": truncated,
+        },
+    )
+
+
+@app.post("/api/org-scan")
+def org_scan(req: OrgScanRequest) -> JSONResponse:
+    _validate_scanners(req.scanners)
+    login = req.org.strip()
+    if not login:
+        raise HTTPException(400, "org is required")
+
+    result = None
+    error_message = None
+    for event, data in _run_org_scan(login, req.token, req.scanners):
+        if event == "done":
+            result = data
+        elif event == "error":
+            error_message = data["message"]
+
+    if error_message:
+        raise HTTPException(400, error_message)
+    return JSONResponse(result)
+
+
+@app.post("/api/org-scan/stream")
+def org_scan_stream(req: OrgScanRequest) -> StreamingResponse:
+    _validate_scanners(req.scanners)
+    login = req.org.strip()
+    if not login:
+        raise HTTPException(400, "org is required")
+
+    def generate():
+        for event, data in _run_org_scan(login, req.token, req.scanners):
             yield _sse(event, data)
 
     return StreamingResponse(

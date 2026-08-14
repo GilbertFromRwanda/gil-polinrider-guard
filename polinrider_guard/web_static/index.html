@@ -25,13 +25,34 @@
     color: var(--text);
     padding: 2rem 1rem 4rem;
   }
-  .wrap { max-width: 860px; margin: 0 auto; }
+  .wrap { max-width: 1400px; margin: 0 auto; }
   h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
   p.sub { color: var(--muted); margin: 0 0 1.5rem; }
+  .columns {
+    display: grid;
+    grid-template-columns: minmax(320px, 480px) 1fr;
+    gap: 1.5rem;
+    align-items: start;
+  }
+  .col-scan, .col-report { min-width: 0; }
+  .col-scan { position: sticky; top: 1rem; }
+  .col-report-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .75rem;
+  }
+  .col-report h2.col-title { font-size: 1rem; margin: 0 0 .75rem; color: var(--muted); }
+  .col-report-header #status { margin-top: 0; text-align: right; }
+  @media (max-width: 900px) {
+    .columns { grid-template-columns: 1fr; }
+    .col-scan { position: static; }
+  }
   form {
     display: flex;
     flex-direction: column;
     gap: .75rem;
+    width: 100%;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -272,12 +293,32 @@
     padding: .7rem 1rem;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
   }
+  .scanner-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    cursor: pointer;
+    flex: 1;
+    min-width: 0;
+  }
+  .scanner-toggle {
+    display: inline-block;
+    flex: 0 0 auto;
+    transition: transform .15s;
+  }
+  .scanner.collapsed .scanner-toggle { transform: rotate(-90deg); }
+  .scanner.collapsed .finding { display: none; }
   .finding {
     padding: .6rem 1rem;
     border-bottom: 1px solid var(--border);
     font-size: .85rem;
   }
+  .finding-checkbox { margin-right: .5rem; vertical-align: middle; }
   .finding:last-child { border-bottom: none; }
   .batch-table {
     border: 1px solid var(--border);
@@ -317,6 +358,22 @@
     cursor: pointer;
   }
   .view-file-btn:hover { background: rgba(79, 209, 197, .08); }
+  .retry-btn {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--critical);
+    color: var(--critical);
+    padding: .1rem .5rem;
+    border-radius: 4px;
+    font: inherit;
+    font-size: .75rem;
+    cursor: pointer;
+  }
+  .retry-btn:hover { background: rgba(255, 84, 112, .08); }
+  .retry-btn:disabled { opacity: .5; cursor: default; }
+  #scan-modal .modal-panel { width: min(640px, 95vw); max-height: 90vh; }
+  #scan-modal .modal-body { overflow-y: auto; flex: 1; }
+  #scan-modal form { border: none; border-radius: 0; }
   #file-viewer-modal .modal-panel { width: min(900px, 95vw); }
   #file-viewer-body {
     overflow: auto;
@@ -409,9 +466,23 @@
   <h1>Gil-Polinrider-Guard</h1>
   <p class="sub">Scan a git repository for PolinRider IOCs before you clone it onto your machine.</p>
 
-  <form id="scan-form">
+  <div class="columns">
+  <div class="col-scan">
+  <button type="button" id="open-scan-modal-btn">New scan</button>
+  <div id="progress"></div>
+  </div>
+
+  <div id="scan-modal" class="modal hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <span class="modal-path">New scan</span>
+        <button type="button" id="scan-modal-close-btn" class="btn-secondary">Close</button>
+      </div>
+      <div class="modal-body">
+      <form id="scan-form">
     <div class="mode-toggle">
       <label><input type="radio" name="mode" value="url" checked> Git URL</label>
+      <label><input type="radio" name="mode" value="org"> GitHub org/user (all repos)</label>
       <label><input type="radio" name="mode" value="path"> Local path (already cloned)</label>
     </div>
 
@@ -433,6 +504,12 @@
       <div class="hint">Token is sent once for this scan only, never stored or logged.</div>
     </div>
 
+    <div id="org-fields" class="fields hidden">
+      <input name="org" type="text" placeholder="some-org, or a GitHub URL (e.g. https://github.com/some-org)">
+      <input name="org-token" type="password" autocomplete="off" placeholder="access token (optional, for private repos / rate limit)">
+      <div class="hint">Scans every repo in that GitHub org or user account. GitHub-only. A token is recommended even for a public account — unauthenticated API calls hit a much lower rate limit — and required to see a private account's repos.</div>
+    </div>
+
     <div id="path-fields" class="fields hidden">
       <input name="path" type="text" placeholder="/path/to/already-cloned/repo">
       <button type="button" id="browse-btn" class="btn-secondary">Browse…</button>
@@ -443,9 +520,15 @@
 
     <button type="submit" id="scan-btn">Scan</button>
   </form>
+      </div>
+    </div>
+  </div>
 
-  <div id="progress"></div>
-  <div id="status"></div>
+  <div class="col-report">
+  <div class="col-report-header">
+    <h2 class="col-title">Report</h2>
+    <div id="status"></div>
+  </div>
   <div id="results"></div>
 
   <div id="recovery-panel" class="hidden">
@@ -507,6 +590,8 @@
       <button type="button" id="recover-remove-tasks-btn" disabled>Remove risky task(s)</button>
       <div id="recover-remove-tasks-result"></div>
     </div>
+  </div>
+  </div>
   </div>
 </div>
 
@@ -575,6 +660,17 @@ function el(tag, attrs, ...children) {
   return node;
 }
 
+// Per-finding "is this actually a problem" triage state, keyed by
+// `${repoKey}::${scannerKey}::${index within that repo+scanner's findings
+// list}`. In-memory only, for this scan session (not persisted across a
+// page reload) -- absence means checked/still-a-problem, the default every
+// finding starts in. Read by exportFindingsCsv to skip anything unchecked.
+const findingChecked = new Map();
+
+function findingKey(repoKey, scannerKey, index) {
+  return `${repoKey}::${scannerKey}::${index}`;
+}
+
 function renderReport(report) {
   const results = document.getElementById("results");
   results.innerHTML = "";
@@ -606,12 +702,40 @@ function renderReport(report) {
   }
   results.appendChild(summary);
 
+  const repoKey = report.source_path || report.repo_name || report.source_url || "";
   for (const [key, findings] of Object.entries(report.scanners || {})) {
     if (!findings.length) continue;
     const box = el("div", { class: "scanner" });
-    box.appendChild(el("h2", { text: `${SCANNER_LABELS[key] || key} (${findings.length})` }));
-    for (const f of findings) {
+
+    const header = el("h2", {});
+    const titleWrap = el("span", { class: "scanner-title-wrap" });
+    titleWrap.appendChild(el("span", { class: "scanner-toggle", text: "▾" }));
+    titleWrap.appendChild(document.createTextNode(`${SCANNER_LABELS[key] || key} (${findings.length})`));
+    titleWrap.addEventListener("click", () => box.classList.toggle("collapsed"));
+    header.appendChild(titleWrap);
+    const headerActions = el("span", { class: "scanner-select-actions" });
+    const checkAllLink = el("a", { text: "check all" });
+    const uncheckAllLink = el("a", { text: "uncheck all" });
+    headerActions.appendChild(checkAllLink);
+    headerActions.appendChild(document.createTextNode(" · "));
+    headerActions.appendChild(uncheckAllLink);
+    header.appendChild(headerActions);
+    box.appendChild(header);
+
+    // Collected as rows are built below so the check-all/uncheck-all links
+    // (in the header, built first) can toggle every finding checkbox in
+    // this scanner's box at once -- by the time either is clickable the
+    // forEach below has already run and populated this array.
+    const scannerCheckboxes = [];
+    findings.forEach((f, i) => {
       const row = el("div", { class: "finding" });
+      const fKey = findingKey(repoKey, key, i);
+      const checkbox = el("input", { type: "checkbox", class: "finding-checkbox" });
+      checkbox.checked = findingChecked.has(fKey) ? findingChecked.get(fKey) : true;
+      checkbox.title = "Uncheck if this isn't actually a problem -- excluded from CSV export when unchecked";
+      checkbox.addEventListener("change", () => findingChecked.set(fKey, checkbox.checked));
+      scannerCheckboxes.push({ checkbox, fKey });
+      row.appendChild(checkbox);
       row.appendChild(el("span", { class: `badge ${f.severity || "unknown"}`, text: f.severity || "?" }));
       row.appendChild(document.createTextNode(" " + findingLine(key, f)));
       if (f.context) row.appendChild(el("span", { class: "ctx", text: `context: ${JSON.stringify(f.context)}` }));
@@ -630,7 +754,23 @@ function renderReport(report) {
         row.appendChild(openBtn);
       }
       box.appendChild(row);
-    }
+    });
+
+    checkAllLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      scannerCheckboxes.forEach(({ checkbox, fKey }) => {
+        checkbox.checked = true;
+        findingChecked.set(fKey, true);
+      });
+    });
+    uncheckAllLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      scannerCheckboxes.forEach(({ checkbox, fKey }) => {
+        checkbox.checked = false;
+        findingChecked.set(fKey, false);
+      });
+    });
+
     results.appendChild(box);
   }
 }
@@ -705,13 +845,34 @@ function markRemainingStepsErrored(idPrefix, stepOrder) {
 
 const form = document.getElementById("scan-form");
 const urlFields = document.getElementById("url-fields");
+const orgFields = document.getElementById("org-fields");
 const pathFields = document.getElementById("path-fields");
+
+// --- scan form modal: the form is hidden until "New scan" is clicked, so
+// the report column has room to breathe instead of a permanently visible
+// form eating half the page.
+const scanModal = document.getElementById("scan-modal");
+function openScanModal() {
+  scanModal.classList.remove("hidden");
+  const visibleField = form.querySelector(".fields:not(.hidden) input[type=text], .fields:not(.hidden) input:not([type=hidden])");
+  if (visibleField) visibleField.focus();
+}
+function closeScanModal() {
+  scanModal.classList.add("hidden");
+}
+document.getElementById("open-scan-modal-btn").addEventListener("click", openScanModal);
+document.getElementById("scan-modal-close-btn").addEventListener("click", closeScanModal);
+scanModal.addEventListener("click", (e) => {
+  if (e.target === scanModal) closeScanModal();
+});
 
 function updateModeVisibility() {
   const mode = form.mode.value;
   urlFields.classList.toggle("hidden", mode !== "url");
+  orgFields.classList.toggle("hidden", mode !== "org");
   pathFields.classList.toggle("hidden", mode !== "path");
   form.url.required = mode === "url";
+  form.org.required = mode === "org";
   form.path.required = mode === "path";
 }
 form.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", updateModeVisibility));
@@ -839,6 +1000,21 @@ form.addEventListener("submit", async (e) => {
     return;
   }
   scannersError.classList.add("hidden");
+  closeScanModal();
+
+  if (form.mode.value === "org") {
+    const orgLogin = parseOrgLogin(form.org.value);
+    if (!orgLogin) {
+      results.innerHTML = "";
+      results.appendChild(el("div", { class: "error", text: "Enter a GitHub org/user name or a github.com URL for one." }));
+      return;
+    }
+    const token = form["org-token"].value.trim();
+    const orgPayload = { org: orgLogin, scanners: selectedScanners };
+    if (token) orgPayload.token = token;
+    await runRepoListScan("/api/org-scan/stream", orgPayload, `Listing repositories for ${orgLogin}`);
+    return;
+  }
 
   const payload = { scanners: selectedScanners };
   if (form.mode.value === "url") {
@@ -880,6 +1056,13 @@ form.addEventListener("submit", async (e) => {
 // renderProgressSkeleton()'s fixed list.
 let lastBatchResult = null;
 let batchRepoPathToStepKey = {};
+// Repos successfully re-scanned via the per-repo Retry button, keyed by
+// their identifying path -- the original batch/org scan's own "done" event
+// has no idea a retry happened (it's a separate /api/scan/stream request),
+// so this is replayed on top of that event's payload once it arrives, or
+// the retry would otherwise get silently discarded the moment the run
+// finishes. See handleBatchSSELine's "done" branch.
+let retriedReports = new Map();
 
 function renderBatchDashboard(data) {
   const results = document.getElementById("results");
@@ -900,6 +1083,11 @@ function renderBatchDashboard(data) {
       el("div", { class: "loc", text: `Showing the first ${data.repos.length} repositories found — more may exist.` })
     );
   }
+  if (data.repos.length) {
+    const exportBtn = el("button", { type: "button", class: "btn-secondary", text: "Export CSV" });
+    exportBtn.addEventListener("click", () => exportFindingsCsv(data));
+    summary.appendChild(exportBtn);
+  }
   results.appendChild(summary);
 
   if (!data.repos.length) return;
@@ -908,7 +1096,7 @@ function renderBatchDashboard(data) {
   for (const report of data.repos) {
     const total = report.summary.total_findings;
     const row = el("div", { class: `batch-row ${total ? "dirty" : "clean"}` });
-    row.appendChild(el("span", { class: "batch-row-name", text: report.source_path }));
+    row.appendChild(el("span", { class: "batch-row-name", text: report.source_path || report.repo_name || report.source_url }));
 
     const badges = el("span", { class: "batch-row-badges" });
     if (total === 0) {
@@ -925,9 +1113,63 @@ function renderBatchDashboard(data) {
     viewBtn.addEventListener("click", () => showBatchRepoDetail(report));
     row.appendChild(viewBtn);
 
+    if (report.source_path) {
+      const fixBtn = el("button", {
+        type: "button",
+        class: "btn-secondary",
+        text: "Fix",
+        title: "Open this repo's report and check what recovery would clean",
+      });
+      fixBtn.addEventListener("click", () => {
+        showBatchRepoDetail(report);
+        triggerRecoverAnalyze();
+      });
+      row.appendChild(fixBtn);
+    }
+
     table.appendChild(row);
   }
   results.appendChild(table);
+}
+
+// CSV cell escaping: wrap in quotes and double up any embedded quotes --
+// RFC 4180's actual escaping rule, not just "hope nothing has a comma".
+function csvCell(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+// Exports every still-checked finding across every repo in a batch/org
+// scan -- unchecked ones (triaged as "not a problem" via the finding
+// checkboxes) are deliberately left out, so this is an action list of what
+// still needs solving, not a full audit dump. "status" is the finding's
+// severity: with dismissed findings already excluded, a Flagged/Dismissed
+// column would be redundant, and severity is what actually differentiates
+// the remaining rows.
+function exportFindingsCsv(data) {
+  const rows = [["RepoName", "files", "issue", "status"]];
+  for (const report of data.repos) {
+    const repoName = report.repo_name || report.source_path || report.source_url || "";
+    const repoKey = report.source_path || report.repo_name || report.source_url || "";
+    for (const [scannerKey, findings] of Object.entries(report.scanners || {})) {
+      findings.forEach((f, i) => {
+        const fKey = findingKey(repoKey, scannerKey, i);
+        const checked = findingChecked.has(fKey) ? findingChecked.get(fKey) : true;
+        if (!checked) return;
+        rows.push([repoName, f.file || "", findingLine(scannerKey, f), (f.severity || "unknown").toUpperCase()]);
+      });
+    }
+  }
+
+  const csv = rows.map((r) => r.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "polinrider-guard-findings.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function showBatchRepoDetail(report) {
@@ -937,10 +1179,13 @@ function showBatchRepoDetail(report) {
   // list once you've viewed any single repo's report.
   renderReport(report);
   lastScanReport = report;
-  showRecoveryPanel(report.source_path);
+  // Org-scan repos have no source_path (their clone is already gone by the
+  // time the browser sees the report) -- Recovery needs a live directory,
+  // so there's nothing to show a panel for.
+  if (report.source_path) showRecoveryPanel(report.source_path);
 
   const results = document.getElementById("results");
-  const backBtn = el("button", { type: "button", class: "btn-secondary", text: "← Back to all repos" });
+  const backBtn = el("button", { type: "button", class: "btn-secondary back-to-batch-btn", text: "← Back to all repos" });
   backBtn.addEventListener("click", () => {
     hideRecoveryPanel();
     renderBatchDashboard(lastBatchResult);
@@ -948,7 +1193,33 @@ function showBatchRepoDetail(report) {
   results.prepend(backBtn);
 }
 
-function handleBatchSSELine(raw, status, results) {
+// Folds one repo's report into `result` (adds or replaces it by identity,
+// re-sorts, recomputes the summary counts the same way the server does).
+// Shared by a normal live repo completion and a successful Retry, since
+// both are "a report showed up for this repo, make the dashboard reflect
+// it" -- the only difference is what happens afterward (see call sites).
+function mergeReportIntoResult(result, report, repoKey) {
+  result.repos = result.repos.filter(
+    (r) => r.source_path !== repoKey && r.source_url !== repoKey && r.repo_name !== repoKey
+  );
+  result.repos.push(report);
+  const displayKey = (r) => r.source_path || r.repo_name || r.source_url || "";
+  result.repos.sort((a, b) => displayKey(a).localeCompare(displayKey(b)));
+
+  result.total_repos = result.repos.length;
+  result.dirty_repos = result.repos.filter((r) => r.summary.total_findings > 0).length;
+  result.total_findings = result.repos.reduce((sum, r) => sum + r.summary.total_findings, 0);
+}
+
+// Re-renders the dashboard table only if that's actually what's currently
+// shown in #results -- not a single repo's detail view, which
+// renderBatchDashboard would otherwise silently blow away out from under
+// whoever's looking at it.
+function refreshBatchDashboardIfShown() {
+  if (!document.querySelector(".back-to-batch-btn")) renderBatchDashboard(lastBatchResult);
+}
+
+function handleBatchSSELine(raw, status, results, payload) {
   const eventMatch = /^event: (.+)$/m.exec(raw);
   const dataMatch = /^data: (.+)$/m.exec(raw);
   if (!dataMatch) return;
@@ -967,6 +1238,22 @@ function handleBatchSSELine(raw, status, results) {
           return { key, label: r.name };
         });
         appendProgressSteps("progress", "batch-step", steps);
+
+        // Start the dashboard now, empty -- rows fill in as repos finish
+        // below instead of only appearing once the very last one lands, so
+        // a completed repo's findings are viewable, and a failed repo's
+        // Retry button is clickable, while the rest of the run is still
+        // going.
+        retriedReports = new Map();
+        lastBatchResult = {
+          root: payload.path || payload.org || "",
+          repos: [],
+          total_repos: 0,
+          dirty_repos: 0,
+          total_findings: 0,
+          truncated: data.truncated || false,
+        };
+        renderBatchDashboard(lastBatchResult);
       }
     } else if (data.step === "repo") {
       const key = batchRepoPathToStepKey[data.repo_path];
@@ -976,14 +1263,28 @@ function handleBatchSSELine(raw, status, results) {
       const state = !data.done ? "running" : data.error ? "error" : "done";
       if (key) setStep("batch-step", key, { state, label: data.label, fileProgress: data.file_progress });
       status.textContent = data.label;
+
+      if (data.done && data.error && key) {
+        attachRetryButton(key, data.repo_path, payload);
+      } else if (data.done && data.report && lastBatchResult) {
+        mergeReportIntoResult(lastBatchResult, data.report, data.repo_path);
+        refreshBatchDashboardIfShown();
+      }
     }
   } else if (eventName === "done") {
+    // The server's own view of "done" has no idea a Retry happened mid-run
+    // (that's a separate /api/scan/stream request) -- replay any onto this
+    // authoritative snapshot before adopting it, or a retry that finished
+    // early would get silently discarded right here.
+    for (const [repoKey, report] of retriedReports) {
+      mergeReportIntoResult(data, report, repoKey);
+    }
     status.textContent =
       data.total_repos > 0
         ? `Scanned ${data.total_repos} repositor${data.total_repos === 1 ? "y" : "ies"} under ${data.root}`
         : `No git repositories found under ${data.root}`;
     lastBatchResult = data;
-    renderBatchDashboard(data);
+    refreshBatchDashboardIfShown();
   } else if (eventName === "error") {
     status.textContent = "";
     results.innerHTML = "";
@@ -991,11 +1292,100 @@ function handleBatchSSELine(raw, status, results) {
   }
 }
 
-document.getElementById("batch-scan-btn").addEventListener("click", async () => {
-  const path = form.path.value.trim();
-  const btn = document.getElementById("batch-scan-btn");
+// Re-scans one repo via the normal single-scan endpoint (which already
+// handles both a local path and a git URL) instead of re-running the whole
+// batch/org scan. For an org-scan repo (repoPath is its clone_url), this
+// also means its clone is kept afterward like any single URL scan's --
+// unlike the original ephemeral org-scan pass, a retried repo *does* get
+// Recovery/"View file" support, since its clone genuinely still exists.
+function attachRetryButton(key, repoPath, payload) {
+  const row = document.getElementById(`batch-step-${key}`);
+  if (!row) return;
+  const header = row.querySelector(".step-header");
+  if (!header || header.querySelector(".retry-btn")) return;
+
+  const btn = el("button", { type: "button", class: "retry-btn", text: "Retry" });
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    btn.disabled = true;
+    btn.textContent = "Retrying…";
+    setStep("batch-step", key, { state: "running", label: "Retrying..." });
+
+    const singlePayload = payload.org
+      ? { url: repoPath, scanners: payload.scanners, ...(payload.token ? { token: payload.token } : {}) }
+      : { path: repoPath, scanners: payload.scanners };
+
+    let succeeded = false;
+    try {
+      await streamSSE("/api/scan/stream", singlePayload, (raw) => {
+        const eventMatch = /^event: (.+)$/m.exec(raw);
+        const dataMatch = /^data: (.+)$/m.exec(raw);
+        if (!dataMatch) return;
+        const eventName = eventMatch ? eventMatch[1] : "message";
+        const data = JSON.parse(dataMatch[1]);
+        if (eventName === "progress") {
+          setStep("batch-step", key, { state: "running", label: data.label });
+        } else if (eventName === "done") {
+          succeeded = true;
+          setStep("batch-step", key, { state: "done", label: `${data.summary.total_findings} finding(s)` });
+          if (lastBatchResult) {
+            retriedReports.set(repoPath, data);
+            mergeReportIntoResult(lastBatchResult, data, repoPath);
+            refreshBatchDashboardIfShown();
+            const status = document.getElementById("status");
+            const n = lastBatchResult.total_repos;
+            status.textContent = `Scanned ${n} repositor${n === 1 ? "y" : "ies"} under ${lastBatchResult.root}`;
+          }
+        } else if (eventName === "error") {
+          setStep("batch-step", key, { state: "error", label: data.message });
+        }
+      });
+    } catch (err) {
+      setStep("batch-step", key, { state: "error", label: String(err.message || err) });
+    }
+
+    if (succeeded) {
+      btn.remove();
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Retry";
+    }
+  });
+  header.appendChild(btn);
+}
+
+// Shared by "scan all repos under this path" and the org-wide scan below --
+// both discover a list of repos server-side first (a "discover" step with
+// unknown-until-then repo count) then scan each one, so they share the same
+// batch-dashboard rendering and SSE event shape (see handleBatchSSELine).
+async function runRepoListScan(endpoint, payload, discoverLabel) {
+  const batchBtn = document.getElementById("batch-scan-btn");
   const scanBtn = document.getElementById("scan-btn");
   const status = document.getElementById("status");
+  const results = document.getElementById("results");
+
+  batchBtn.disabled = true;
+  scanBtn.disabled = true;
+  status.textContent = "Starting scan...";
+  results.innerHTML = "";
+  hideRecoveryPanel();
+  batchRepoPathToStepKey = {};
+  renderProgressSkeleton("progress", "batch-step", [{ key: "discover", label: discoverLabel }]);
+
+  try {
+    await streamSSE(endpoint, payload, (raw) => handleBatchSSELine(raw, status, results, payload));
+  } catch (err) {
+    status.textContent = "";
+    results.innerHTML = "";
+    results.appendChild(el("div", { class: "error", text: String(err.message || err) }));
+  } finally {
+    batchBtn.disabled = false;
+    scanBtn.disabled = false;
+  }
+}
+
+document.getElementById("batch-scan-btn").addEventListener("click", async () => {
+  const path = form.path.value.trim();
   const results = document.getElementById("results");
 
   if (!path) {
@@ -1010,30 +1400,56 @@ document.getElementById("batch-scan-btn").addEventListener("click", async () => 
     return;
   }
   scannersError.classList.add("hidden");
+  closeScanModal();
 
-  btn.disabled = true;
-  scanBtn.disabled = true;
-  status.textContent = "Starting batch scan...";
-  results.innerHTML = "";
-  hideRecoveryPanel();
-  batchRepoPathToStepKey = {};
-  renderProgressSkeleton("progress", "batch-step", [{ key: "discover", label: "Discover git repositories" }]);
-
-  try {
-    await streamSSE(
-      "/api/batch-scan/stream",
-      { path, scanners: selectedScanners },
-      (raw) => handleBatchSSELine(raw, status, results)
-    );
-  } catch (err) {
-    status.textContent = "";
-    results.innerHTML = "";
-    results.appendChild(el("div", { class: "error", text: String(err.message || err) }));
-  } finally {
-    btn.disabled = false;
-    scanBtn.disabled = false;
-  }
+  await runRepoListScan(
+    "/api/batch-scan/stream",
+    { path, scanners: selectedScanners },
+    "Discover git repositories"
+  );
 });
+
+// Pulls a GitHub org/user login out of whatever the "GitHub org/user" field
+// contains -- a plain login, or basically any github.com URL pointing at
+// that account, however many extra path segments it has: a bare root
+// (github.com/some-org), the org repos tab as GitHub's own UI links it
+// (github.com/orgs/some-org/repositories), a URL with no scheme (users
+// routinely paste "github.com/..." without "https://"), or git@ scp-style.
+// Deliberately lenient (unlike the old auto-detect-from-the-URL-field
+// approach this replaced, which only matched a *bare* root and silently
+// fell through to a single-repo clone on anything else, e.g. exactly the
+// /orgs/.../repositories shape GitHub itself links to) -- this field only
+// ever means "org scan", so there's no ambiguity to resolve by being
+// strict. Returns null only for input that isn't github.com at all, or
+// where no segment is left to use as a login.
+function parseOrgLogin(raw) {
+  const input = raw.trim().replace(/\/+$/, "");
+  if (!input) return null;
+
+  let host, path;
+  if (/^git@/i.test(input)) {
+    const m = /^git@([^:]+):(.*)$/i.exec(input);
+    if (!m) return null;
+    [, host, path] = m;
+  } else if (!/[\/:.]/.test(input)) {
+    // No slash, colon, or dot at all -- plain login, not a URL of any kind.
+    return input;
+  } else {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(input) ? input : `https://${input}`;
+    try {
+      const u = new URL(withScheme);
+      host = u.hostname;
+      path = u.pathname.replace(/^\//, "");
+    } catch (_) {
+      return null;
+    }
+  }
+  if (!/^(www\.)?github\.com$/i.test(host)) return null;
+  if (path.toLowerCase().endsWith(".git")) path = path.slice(0, -4);
+  let segments = path.split("/").filter(Boolean);
+  if (segments[0] && segments[0].toLowerCase() === "orgs") segments = segments.slice(1); // /orgs/<login>/...
+  return segments[0] || null;
+}
 
 // --- local-path folder browser -------------------------------------------
 // A browser can't hand a client-side folder picker's real filesystem path

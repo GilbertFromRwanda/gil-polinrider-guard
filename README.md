@@ -351,6 +351,38 @@ would after scanning that repo directly, since nothing about a repo's own
 scan or recovery flow changes just because it was discovered this way.
 Capped at 200 repos per run, noted on the dashboard if hit.
 
+### Scanning every repo in a GitHub org or user account
+
+A third source toggle, **GitHub org/user (all repos)**, next to Git URL and
+Local path — enter just the login (`some-org`) or basically any github.com
+URL for that account (a bare root, `github.com/orgs/some-org/repositories`
+as GitHub's own UI links an org's repo list, with or without `https://`,
+`git@github.com:some-org`) and it scans every repo in that account instead
+of a single clone. GitHub-only for now. Under the hood it lists the
+account's repos via GitHub's API (trying the org endpoint first, then the
+user endpoint, since a bare login can't tell those apart up front), then
+clones, scans, and immediately deletes each repo in turn — unlike a single
+URL scan, nothing is kept on disk afterward, since an org can be arbitrarily
+large and there's no single "most recent clone" slot to reuse the way one
+repo has. That also means Recovery and the file viewer/"Open in folder"
+buttons aren't available for an org-scanned repo's report (there's no clone
+left for them to point at) — re-scan that one repo by URL if you need those
+(or use the per-repo **Retry** button described below, which keeps its
+clone since it goes through the ordinary single-scan path). Reuses the same
+dashboard, bounded per-repo concurrency (`--batch-workers`), and 200-repo
+cap as scanning a local folder of repos above. A token in this mode's token
+field is used both for the GitHub API listing call and for cloning, so it's
+worth providing even for a public account — unauthenticated GitHub API
+calls are rate-limited far more aggressively — and it's required to see a
+private org/account's repos at all.
+
+Either this or the local-folder batch scan above can leave one or two repos
+failed (a clone timeout, a transient network error) without the whole run
+being a loss — a failed repo's progress row gets a **Retry** button once the
+run finishes, which re-scans just that repo via the normal single-scan path
+and folds the result into the dashboard in place, rather than requiring a
+full re-run.
+
 Every finding tied to a specific file has a **View file** button that opens
 it in a modal, scrolled to and highlighting the matching line where one
 applies (`GET /api/file`, resolved and checked to stay inside the scanned

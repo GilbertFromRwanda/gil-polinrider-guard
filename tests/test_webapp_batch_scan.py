@@ -200,6 +200,30 @@ def test_batch_scan_stream_emits_discover_and_repo_progress(tmp_path, client):
     assert any(d.get("done") for d in repo_events)
 
 
+def test_batch_scan_stream_repo_finished_event_carries_full_report(tmp_path, client):
+    # The web UI renders a repo's findings (and offers Retry on failure)
+    # the moment that repo finishes, not just once the whole batch is done
+    # -- it needs the full report on the per-repo event for that, not just
+    # the count/severity summary.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo = workspace / "dirty-repo"
+    _init_repo(repo)
+    (repo / "assets").mkdir()
+    (repo / "assets" / "icon.woff2").write_bytes(b"function evil(){require('fs')}")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "add masquerade")
+
+    resp = client.post("/api/batch-scan/stream", json={"path": str(workspace)})
+    events = _collect_sse(resp)
+
+    finished = [d for e, d in events if e == "progress" and d.get("step") == "repo" and d.get("done") and not d.get("error")]
+    assert len(finished) == 1
+    report = finished[0]["report"]
+    assert report["summary"]["total_findings"] == 1
+    assert report["scanners"]["extension_masquerade"][0]["file"] in ("assets/icon.woff2", "assets\\icon.woff2")
+
+
 def test_batch_scan_stream_emits_started_before_finished_per_repo(tmp_path, client):
     # Regression test: a repo's row must flip to a "running" state the
     # moment a worker actually picks it up, not just jump straight from
