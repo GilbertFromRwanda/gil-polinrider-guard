@@ -22,8 +22,8 @@ same way a git commit message isn't -- but a scan finding you can't explain
 why you dismissed isn't meaningfully reviewed.
 
 Identifier format depends on what the scanner's findings are keyed by:
-  - file-based (clock_tamper_tooling, extension_masquerade, vscode_tasks):
-    the finding's relative file path, exact match.
+  - file-based (clock_tamper_tooling, extension_masquerade, vscode_tasks,
+    js_ecosystem_attack): the finding's relative file path, exact match.
   - file+line-based (hidden_payload_padding, ioc_literal_match):
     "path:line", exact match.
   - commit-based (commit_camouflage): a prefix of the commit hash, 7+ hex

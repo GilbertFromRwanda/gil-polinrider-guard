@@ -8,7 +8,7 @@ most recent confirmed variant — disguised the payload as a binary asset
 like a font file so extension-based scanners never look at it (the
 "font-file vector").
 
-This repo gives you six independent scanners, an aggregator, a
+This repo gives you seven independent scanners, an aggregator, a
 history-surgery recovery tool (CLI, batch, and browser), YARA rules, git
 hooks, and a CI workflow — all built around one idea: **file extension is a
 trust model, not a security model.** None of the detectors here gate on
@@ -33,7 +33,7 @@ inside a mass reformat (`scan_commit_camouflage.py`).
 - [How to run](#how-to-run)
 - [Install](#install)
 - [Quick start: scan before you open a project](#quick-start-scan-before-you-open-a-project)
-- [The six scanners](#the-six-scanners)
+- [The seven scanners](#the-seven-scanners)
 - [Suppressing a false positive (allowlist)](#suppressing-a-false-positive-allowlist)
 - [Recovering an already-compromised repository](#recovering-an-already-compromised-repository)
 - [Web UI](#web-ui)
@@ -89,10 +89,11 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
-This installs six console commands: `polinrider-scan-masquerade`,
+This installs seven console commands: `polinrider-scan-masquerade`,
 `polinrider-scan-vscode`, `polinrider-scan-ioc`,
 `polinrider-scan-padding`, `polinrider-scan-clock-tamper`,
-`polinrider-scan-commit-camouflage`, and the aggregator, `polinrider-guard`.
+`polinrider-scan-commit-camouflage`, `polinrider-scan-js-ecosystem`, and the
+aggregator, `polinrider-guard`.
 
 ## Quick start: scan before you open a project
 
@@ -121,7 +122,7 @@ polinrider-guard examples/vulnerable-samples --no-git    # -> 3 findings, exit 1
 See [examples/vulnerable-samples/SAFETY.md](examples/vulnerable-samples/SAFETY.md)
 for what that fixture contains and why it's safe.
 
-## The six scanners
+## The seven scanners
 
 | Scanner | Detects | Command |
 |---|---|---|
@@ -130,6 +131,7 @@ for what that fixture contains and why it's safe.
 | Known IOC strings | Literal BeaverTail C2 domains, Glassworm loader marker, decode-and-eval / HiddenSpawn / EtherHiding patterns sitting in plain (non-hidden) source | `polinrider-scan-ioc PATH` |
 | Hidden payload padding | A payload pushed off-screen behind 80+ spaces, or a line that's a massive outlier next to the rest of the file — structural, not byte-signature-based | `polinrider-scan-padding PATH` |
 | Clock-tamper tooling | A script that spoofs the system clock and runs `git commit --amend` — the *tooling* behind a forged backdated commit, not just its aftermath | `polinrider-scan-clock-tamper PATH` |
+| JS-ecosystem execution stages | Risky npm install-lifecycle scripts (own + dependencies'), `task.allowAutomaticTasks` defeating VS Code's folderOpen confirmation, `NODE_OPTIONS`/`--require`/`--import`/`NODE_PATH` preload hooks (especially in a committed `.env`), and framework config files (`next.config.*`, `vite.config.*`, etc.) that execute code the moment the dev server/build tool starts | `polinrider-scan-js-ecosystem PATH` |
 | Commit camouflage | A mass-touch, mostly-no-op commit (e.g. a reformat sweep) that also slips in a new script/executable file — burying the one change that matters | `polinrider-scan-commit-camouflage PATH` |
 
 Each one also works standalone with `--json` for scripting, and each is a
@@ -164,7 +166,7 @@ The identifier format depends on what the scanner reports a finding *as*:
 
 | Scanner (`type` in JSON output) | Identifier format |
 | --- | --- |
-| `extension_masquerade`, `vscode_tasks`, `clock_tamper_tooling` | file path, relative to the scanned root |
+| `extension_masquerade`, `vscode_tasks`, `clock_tamper_tooling`, `js_ecosystem_attack` | file path, relative to the scanned root |
 | `hidden_payload_padding`, `ioc_literal_match` | `path:line` |
 | `commit_camouflage` | commit SHA, or any unambiguous prefix of it (at least 7 characters) |
 
@@ -213,8 +215,13 @@ re-cloned afterward).
 After scanning a local path (see [Web UI](#web-ui) below), a **Recovery**
 panel appears under the report. It runs the exact same logic as
 `scripts/surgical_clean.py` — now shared as `polinrider_guard/recovery.py`
-so the CLI and the browser can't drift apart, and covers all six scanners,
-each handled the way its own technique demands:
+so the CLI and the browser can't drift apart, and covers six of the seven
+scanners, each handled the way its own technique demands (the exception is
+`scan_js_ecosystem.py`: its findings are mostly live config — `package.json`
+scripts, `.vscode/settings.json`, framework config files — rather than
+payloads hidden inside git history, so there's no blob to blank; review and
+fix those in the working tree the same way you'd fix any other config
+change):
 
 - **IOC lines** (`scan_ioc.py`'s patterns) and **whitespace-padding-hidden
   lines** (`scan_padding.py`'s signal) — both per-line matches, stripped
@@ -333,11 +340,11 @@ themselves skip, so it can't wander into something that could never hold a
 separate project), and doesn't descend into a repo it's already found —
 a vendored/checked-out repo nested inside another stays bundled with its
 parent instead of becoming a second scan target. Each repo found is then
-run through the exact same six-scanner pipeline as a single scan, with
+run through the exact same seven-scanner pipeline as a single scan, with
 bounded concurrency across repos (so a folder with dozens of repos doesn't
 try to spin up dozens of repos' worth of scanner threads all at once) —
 8 repos at a time by default, since each repo's own scan already runs its
-six scanners concurrently internally. Raise it with
+seven scanners concurrently internally. Raise it with
 `polinrider-guard-web --batch-workers 16`, or `BATCH_WORKERS=16 docker
 compose up web` under Compose, if you're scanning a large workspace and
 have the cores/disk throughput to back a higher number.
@@ -485,7 +492,7 @@ yara -d filename=path/to/file rules/polinrider.yar path/to/file
 
 ## Findings from a live sample
 
-Three of the six scanners (`scan_padding.py`, `scan_clock_tamper.py`,
+Three of the seven scanners (`scan_padding.py`, `scan_clock_tamper.py`,
 `scan_commit_camouflage.py`) exist because of a real PolinRider-family
 sample found via this tool, not a hypothetical. Summary, for anyone
 auditing why these detectors look the way they do:
@@ -519,7 +526,7 @@ and persistence mechanisms above.
 ## Project layout
 
 ```
-polinrider_guard/       the six scanners + guard.py aggregator + shared IOC list
+polinrider_guard/       the seven scanners + guard.py aggregator + shared IOC list
   skip_lists.py           shared directory/extension skip-lists
   allowlist.py            .polinrider-allowlist parsing, shared by every scanner
   recovery.py             history-surgery logic shared by the CLI and the web UI

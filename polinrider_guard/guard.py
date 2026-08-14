@@ -18,6 +18,7 @@ from . import (
     scan_clock_tamper,
     scan_commit_camouflage,
     scan_ioc,
+    scan_js_ecosystem,
     scan_masquerade,
     scan_padding,
     scan_vscode,
@@ -35,6 +36,7 @@ SCANNER_STEPS: list[tuple[str, str]] = [
     ("hidden_payload_padding", "Hidden payload padding (whitespace/line-length anomaly)"),
     ("clock_tamper_tooling", "Clock-tamper git automation (ForceMemo tooling)"),
     ("ioc_literal_match", "Known IOC strings (C2 domains, loader markers)"),
+    ("js_ecosystem_attack", "JS-ecosystem execution-stage attacks (install lifecycle, IDE auto-run, preload hooks, framework config)"),
     ("commit_camouflage", "Commit camouflage (mass-touch decoy commit)"),
 ]
 
@@ -47,6 +49,7 @@ SCANNER_STEPS: list[tuple[str, str]] = [
 # report a "N/total files" progress bar.
 PROGRESS_CAPABLE_SCANNERS = {
     "extension_masquerade", "hidden_payload_padding", "clock_tamper_tooling", "ioc_literal_match",
+    "js_ecosystem_attack",
 }
 
 
@@ -126,6 +129,7 @@ def run_guard(
         "hidden_payload_padding": scan_padding.scan_path,
         "clock_tamper_tooling": scan_clock_tamper.scan_path,
         "ioc_literal_match": scan_ioc.scan_path,
+        "js_ecosystem_attack": scan_js_ecosystem.scan_path,
         "commit_camouflage": scan_commit_camouflage.scan_path,
     }
     all_tasks: dict[str, object] = {key: _task(key, fn) for key, fn in scan_funcs.items()}
@@ -194,6 +198,9 @@ def _print_finding_line(scanner: str, f: dict) -> None:
         print(f"      {f['context']}")
     elif scanner == "clock_tamper_tooling":
         print(f"  [{sev}] {f['file']}: {'; '.join(f['indicators'])}")
+    elif scanner == "js_ecosystem_attack":
+        print(f"  [{sev}] {f['file']} ({f['stage']}/{f['category']}): {'; '.join(f['indicators'])}")
+        print(f"      {f['detail']}")
     elif scanner == "commit_camouflage":
         print(
             f"  [{sev}] {f['commit'][:12]} - {f['subject']} "

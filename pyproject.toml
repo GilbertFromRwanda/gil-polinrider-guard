@@ -22,6 +22,7 @@ polinrider-scan-ioc = "polinrider_guard.scan_ioc:main"
 polinrider-scan-padding = "polinrider_guard.scan_padding:main"
 polinrider-scan-clock-tamper = "polinrider_guard.scan_clock_tamper:main"
 polinrider-scan-commit-camouflage = "polinrider_guard.scan_commit_camouflage:main"
+polinrider-scan-js-ecosystem = "polinrider_guard.scan_js_ecosystem:main"
 polinrider-guard = "polinrider_guard.guard:main"
 polinrider-guard-web = "polinrider_guard.webapp:main"
 

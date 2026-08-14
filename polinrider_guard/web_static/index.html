@@ -663,6 +663,7 @@ const SCANNER_LABELS = {
   hidden_payload_padding: "Hidden payload padding (whitespace/line-length anomaly)",
   clock_tamper_tooling: "Clock-tamper git automation (ForceMemo tooling)",
   ioc_literal_match: "Known IOC strings (C2 domains, loader markers)",
+  js_ecosystem_attack: "JS-ecosystem execution-stage attacks (install lifecycle, IDE auto-run, preload hooks, framework config)",
   commit_camouflage: "Commit camouflage (mass-touch decoy commit)",
 };
 
@@ -678,6 +679,8 @@ function findingLine(scanner, f) {
       return `${f.file}:${f.line} (${f.kind}, ${f.line_length} chars) - ${f.context}`;
     case "clock_tamper_tooling":
       return `${f.file}: ${(f.indicators || []).join("; ")}`;
+    case "js_ecosystem_attack":
+      return `${f.file} (${f.stage}/${f.category}): ${(f.indicators || []).join("; ")} -- ${f.detail}`;
     case "commit_camouflage":
       return `${(f.commit || "").slice(0, 12)} - ${f.subject} (${f.files_changed} files, ${f.noop_like_files} no-op-like, new: ${(f.suspicious_new_files || []).join(", ")})`;
     default:
@@ -872,6 +875,7 @@ const STEP_ORDER = [
   { key: "hidden_payload_padding", label: SCANNER_LABELS.hidden_payload_padding },
   { key: "clock_tamper_tooling", label: SCANNER_LABELS.clock_tamper_tooling },
   { key: "ioc_literal_match", label: SCANNER_LABELS.ioc_literal_match },
+  { key: "js_ecosystem_attack", label: SCANNER_LABELS.js_ecosystem_attack },
   { key: "commit_camouflage", label: SCANNER_LABELS.commit_camouflage },
 ];
 

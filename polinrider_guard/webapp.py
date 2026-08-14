@@ -50,6 +50,7 @@ from . import (
     scan_clock_tamper,
     scan_commit_camouflage,
     scan_ioc,
+    scan_js_ecosystem,
     scan_masquerade,
     scan_padding,
     scan_vscode,
@@ -87,6 +88,7 @@ _SCAN_FUNCS = {
     "hidden_payload_padding": scan_padding.scan_path,
     "clock_tamper_tooling": scan_clock_tamper.scan_path,
     "ioc_literal_match": scan_ioc.scan_path,
+    "js_ecosystem_attack": scan_js_ecosystem.scan_path,
 }
 
 def _run_one_scanner(
@@ -239,7 +241,7 @@ MAX_BATCH_DIRS_VISITED = 20_000  # safety net against walking a huge non-repo tr
 # How many repos to scan concurrently. Deliberately bounded, not unbounded:
 # each repo's own scan already spins up len(SCANNER_STEPS) worker threads
 # internally, so this multiplies thread count by however many repos are in
-# flight at once -- at the default of 8, worst case is 8 * 6 = 48 threads.
+# flight at once -- at the default of 8, worst case is 8 * 7 = 56 threads.
 # A module-level variable (not a constant) so main() below can override it
 # from --batch-workers before the server starts; nothing else should change
 # it at runtime.
@@ -1577,7 +1579,7 @@ def _parse_args(argv: list[str] | None = None):
         help=(
             "how many repos the 'scan all repos under this path' feature scans "
             f"concurrently (default: {BATCH_SCAN_MAX_WORKERS}); each repo's own scan "
-            "already runs its six scanners concurrently, so raise this only if you "
+            "already runs its seven scanners concurrently, so raise this only if you "
             "have the cores/disk throughput to back it"
         ),
     )
