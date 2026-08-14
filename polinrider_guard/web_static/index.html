@@ -339,6 +339,42 @@
   .batch-row-name { flex: 1; overflow-wrap: anywhere; }
   .batch-row.clean .batch-row-name { color: var(--muted); }
   .batch-row-badges { flex: 0 0 auto; white-space: nowrap; }
+  .batch-row.active { background: rgba(79, 209, 197, .12); box-shadow: inset 3px 0 0 var(--accent); }
+  .batch-row-hidden { display: none; }
+  .batch-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    margin-bottom: .75rem;
+  }
+  .batch-filter input[type=text] { flex: 1 1 220px; }
+  .batch-filter select {
+    background: #0b0f14;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: .6rem .7rem;
+    border-radius: 6px;
+    font: inherit;
+  }
+  .findings-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .5rem;
+    margin-bottom: 1rem;
+  }
+  .findings-filter input[type=text] { flex: 1 1 220px; }
+  .findings-filter-sev { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .filter-chip {
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    padding: .1rem .5rem;
+    transition: opacity .15s;
+  }
+  .filter-chip:not(.active) { opacity: .3; }
+  .finding-hidden { display: none; }
+  .scanner-hidden { display: none; }
   .finding .ctx {
     display: block;
     margin-top: .25rem;
@@ -702,6 +738,59 @@ function renderReport(report) {
   }
   results.appendChild(summary);
 
+  // --- findings filter: only worth the clutter once there are enough
+  // findings that scrolling through all of them is tedious. State lives
+  // as closures here rather than module-level, since renderReport rebuilds
+  // #results from scratch on every call anyway.
+  const activeSeverities = new Set(["critical", "high", "medium", "low", "unknown"]);
+  let filterText = "";
+
+  function applyFindingsFilter() {
+    const q = filterText.trim().toLowerCase();
+    results.querySelectorAll(".scanner").forEach((box) => {
+      let visibleCount = 0;
+      box.querySelectorAll(".finding").forEach((row) => {
+        const sev = row.dataset.severity || "unknown";
+        const visible = activeSeverities.has(sev) && (!q || row.textContent.toLowerCase().includes(q));
+        row.classList.toggle("finding-hidden", !visible);
+        if (visible) visibleCount++;
+      });
+      box.classList.toggle("scanner-hidden", visibleCount === 0);
+    });
+  }
+
+  if (total > 5) {
+    const filterBar = el("div", { class: "findings-filter" });
+
+    const textInput = el("input", { type: "text", placeholder: "Filter findings…" });
+    textInput.addEventListener("input", () => {
+      filterText = textInput.value;
+      applyFindingsFilter();
+    });
+    filterBar.appendChild(textInput);
+
+    const sevBar = el("span", { class: "findings-filter-sev" });
+    const bySev = report.summary.by_severity || {};
+    for (const sev of ["critical", "high", "medium", "low", "unknown"]) {
+      if (!bySev[sev]) continue;
+      const chip = el("button", { type: "button", class: `badge ${sev} filter-chip active`, text: `${sev} ${bySev[sev]}` });
+      chip.title = "Click to toggle this severity in/out of the list below";
+      chip.addEventListener("click", () => {
+        if (activeSeverities.has(sev)) {
+          activeSeverities.delete(sev);
+          chip.classList.remove("active");
+        } else {
+          activeSeverities.add(sev);
+          chip.classList.add("active");
+        }
+        applyFindingsFilter();
+      });
+      sevBar.appendChild(chip);
+    }
+    filterBar.appendChild(sevBar);
+    results.appendChild(filterBar);
+  }
+
   const repoKey = report.source_path || report.repo_name || report.source_url || "";
   for (const [key, findings] of Object.entries(report.scanners || {})) {
     if (!findings.length) continue;
@@ -729,6 +818,7 @@ function renderReport(report) {
     const scannerCheckboxes = [];
     findings.forEach((f, i) => {
       const row = el("div", { class: "finding" });
+      row.dataset.severity = (f.severity || "unknown").toLowerCase();
       const fKey = findingKey(repoKey, key, i);
       const checkbox = el("input", { type: "checkbox", class: "finding-checkbox" });
       checkbox.checked = findingChecked.has(fKey) ? findingChecked.get(fKey) : true;
@@ -1063,6 +1153,18 @@ let batchRepoPathToStepKey = {};
 // the retry would otherwise get silently discarded the moment the run
 // finishes. See handleBatchSSELine's "done" branch.
 let retriedReports = new Map();
+// Identifying key (source_path/repo_name/source_url) of the repo row the
+// user last clicked View report/Fix on -- re-applied as the "active"
+// highlight every time the dashboard re-renders (live updates mid-run,
+// returning via "Back to all repos"), not just at click time.
+let activeBatchRepoKey = null;
+// Current repo-name/status filter, kept across re-renders the same way.
+let batchFilterText = "";
+let batchFilterStatus = "all";
+
+function repoRowKey(report) {
+  return report.source_path || report.repo_name || report.source_url || "";
+}
 
 function renderBatchDashboard(data) {
   const results = document.getElementById("results");
@@ -1092,10 +1194,42 @@ function renderBatchDashboard(data) {
 
   if (!data.repos.length) return;
 
+  // Only worth showing a filter bar once there's more than a handful of
+  // rows to dig through -- for a couple of repos it's just clutter.
+  if (data.repos.length > 5) {
+    const filterBar = el("div", { class: "batch-filter" });
+
+    const textInput = el("input", { type: "text", placeholder: "Filter repos by name…" });
+    textInput.value = batchFilterText;
+    textInput.addEventListener("input", () => {
+      batchFilterText = textInput.value;
+      applyBatchRowFilter();
+    });
+    filterBar.appendChild(textInput);
+
+    const statusSelect = el("select", {});
+    statusSelect.appendChild(el("option", { value: "all", text: "All" }));
+    statusSelect.appendChild(el("option", { value: "dirty", text: "With findings" }));
+    statusSelect.appendChild(el("option", { value: "clean", text: "Clean" }));
+    statusSelect.value = batchFilterStatus;
+    statusSelect.addEventListener("change", () => {
+      batchFilterStatus = statusSelect.value;
+      applyBatchRowFilter();
+    });
+    filterBar.appendChild(statusSelect);
+
+    results.appendChild(filterBar);
+  }
+
   const table = el("div", { class: "batch-table" });
   for (const report of data.repos) {
     const total = report.summary.total_findings;
-    const row = el("div", { class: `batch-row ${total ? "dirty" : "clean"}` });
+    const rowKey = repoRowKey(report);
+    const rowClasses = ["batch-row", total ? "dirty" : "clean"];
+    if (rowKey && rowKey === activeBatchRepoKey) rowClasses.push("active");
+    const row = el("div", { class: rowClasses.join(" ") });
+    row.dataset.repoName = (report.source_path || report.repo_name || report.source_url || "").toLowerCase();
+    row.dataset.status = total ? "dirty" : "clean";
     row.appendChild(el("span", { class: "batch-row-name", text: report.source_path || report.repo_name || report.source_url }));
 
     const badges = el("span", { class: "batch-row-badges" });
@@ -1110,7 +1244,10 @@ function renderBatchDashboard(data) {
     row.appendChild(badges);
 
     const viewBtn = el("button", { type: "button", class: "btn-secondary", text: "View report" });
-    viewBtn.addEventListener("click", () => showBatchRepoDetail(report));
+    viewBtn.addEventListener("click", () => {
+      activeBatchRepoKey = rowKey;
+      showBatchRepoDetail(report);
+    });
     row.appendChild(viewBtn);
 
     if (report.source_path) {
@@ -1121,6 +1258,7 @@ function renderBatchDashboard(data) {
         title: "Open this repo's report and check what recovery would clean",
       });
       fixBtn.addEventListener("click", () => {
+        activeBatchRepoKey = rowKey;
         showBatchRepoDetail(report);
         triggerRecoverAnalyze();
       });
@@ -1130,6 +1268,20 @@ function renderBatchDashboard(data) {
     table.appendChild(row);
   }
   results.appendChild(table);
+  applyBatchRowFilter();
+}
+
+// Shows/hides each batch-row against the current name/status filter --
+// called after every render and on every filter-input change, since a
+// batch scan can mutate #results (progress fills in rows) without a full
+// renderBatchDashboard() call in between.
+function applyBatchRowFilter() {
+  const q = batchFilterText.trim().toLowerCase();
+  document.querySelectorAll(".batch-row").forEach((row) => {
+    const matchesText = !q || row.dataset.repoName.includes(q);
+    const matchesStatus = batchFilterStatus === "all" || row.dataset.status === batchFilterStatus;
+    row.classList.toggle("batch-row-hidden", !(matchesText && matchesStatus));
+  });
 }
 
 // CSV cell escaping: wrap in quotes and double up any embedded quotes --
@@ -1245,6 +1397,9 @@ function handleBatchSSELine(raw, status, results, payload) {
         // Retry button is clickable, while the rest of the run is still
         // going.
         retriedReports = new Map();
+        activeBatchRepoKey = null;
+        batchFilterText = "";
+        batchFilterStatus = "all";
         lastBatchResult = {
           root: payload.path || payload.org || "",
           repos: [],
