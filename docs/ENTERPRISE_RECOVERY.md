@@ -95,7 +95,7 @@ line, `#`-prefixed lines ignored).
 
 ## Multi-repository recovery
 
-See the main [README](../README.md#cleaning-many-repositories-at-once) for
+See [DETAILS.md](DETAILS.md#cleaning-many-repositories-at-once) for
 `scripts/batch-clean.sh`, which runs this whole flow (minus the push, unless
 you explicitly opt in) across a list of repositories and produces a
 JSON-lines audit log.

@@ -5,7 +5,7 @@ gets cloned into a scratch directory, or point it at a path already on disk
 (e.g. a repo you've already cloned, or one mounted into this project's
 Docker image at /scan). Either way it's run through the same scanner steps
 as the CLI's run_guard(), with progress streamed back to the browser as it
-goes. See README.md's "Web UI" section.
+goes. See docs/DETAILS.md's "Web UI" section.
 
 URL clones are full clones, not shallow (--depth 1) ones: the scan's clone
 directory is kept around after scanning (see _last_scan_clone below) so
