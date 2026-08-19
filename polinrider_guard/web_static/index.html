@@ -177,6 +177,29 @@
   }
   .browse-row:last-child { border-bottom: none; }
   .browse-row:hover { background: rgba(79, 209, 197, .08); }
+  .col-scan-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .clones-list { overflow-y: auto; flex: 1; min-height: 120px; }
+  .clones-empty { padding: 1rem .9rem; font-size: .85rem; color: var(--muted); }
+  .clone-row {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .55rem .9rem;
+    font-size: .8rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .clone-row:last-child { border-bottom: none; }
+  .clone-info { flex: 1; min-width: 0; }
+  .clone-repo-name { color: var(--text); }
+  .clone-meta {
+    color: var(--muted);
+    font-size: .75rem;
+    margin-top: .15rem;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .clone-row .btn-secondary { flex: 0 0 auto; padding: .35rem .7rem; font-size: .75rem; }
+  .clones-total { color: var(--muted); font-size: .8rem; flex: 1; }
   .modal-footer {
     display: flex;
     justify-content: flex-end;
@@ -281,6 +304,7 @@
   .badge.medium { background: var(--medium); color: #2a2000; }
   .badge.low { background: var(--low); color: #001428; }
   .badge.unknown { background: var(--muted); color: #06201d; }
+  .badge.fixed { background: var(--accent); color: #06201d; }
   .scanner {
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -504,7 +528,10 @@
 
   <div class="columns">
   <div class="col-scan">
+  <div class="col-scan-actions">
   <button type="button" id="open-scan-modal-btn">New scan</button>
+  <button type="button" id="open-clones-modal-btn" class="btn-secondary">Temp clones</button>
+  </div>
   <div id="progress"></div>
   </div>
 
@@ -656,6 +683,20 @@
   </div>
 </div>
 
+<div id="clones-modal" class="modal hidden">
+  <div class="modal-panel">
+    <div class="modal-header">
+      <span class="modal-path">Temp clones — kept org/batch-scan clones, not auto-deleted</span>
+      <button type="button" id="clones-modal-close-btn" class="btn-secondary">Close</button>
+    </div>
+    <div id="clones-list" class="clones-list"></div>
+    <div class="modal-footer">
+      <span id="clones-total" class="clones-total"></span>
+      <button type="button" id="clones-delete-all-btn" class="btn-secondary">Delete all</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const SCANNER_LABELS = {
   extension_masquerade: "Extension masquerade (font-file vector)",
@@ -736,6 +777,18 @@ function renderReport(report) {
     openRootBtn.addEventListener("click", () => openInFileExplorer(report.source_path, null, openRootBtn));
     summary.appendChild(openRootBtn);
   }
+  if (report.clone_id) {
+    const deleteCloneBtn = el("button", {
+      type: "button",
+      class: "view-file-btn",
+      text: "Delete clone",
+      title: "Delete this repo's kept clone from disk",
+    });
+    deleteCloneBtn.addEventListener("click", () => {
+      deleteReportClone(report, deleteCloneBtn, () => showBatchRepoDetail(report));
+    });
+    summary.appendChild(deleteCloneBtn);
+  }
   results.appendChild(summary);
 
   // --- findings filter: only worth the clutter once there are enough
@@ -791,7 +844,12 @@ function renderReport(report) {
     results.appendChild(filterBar);
   }
 
-  const repoKey = report.source_path || report.repo_name || report.source_url || "";
+  // repo_name first so an org-scan repo's triage state (findingChecked)
+  // survives its clone being deleted afterward (deleteReportClone clears
+  // source_path, but not repo_name/source_url) -- must stay in sync with
+  // exportFindingsCsv's identical repoKey below, since both key into the
+  // same findingChecked map.
+  const repoKey = report.repo_name || report.source_url || report.source_path || "";
   for (const [key, findings] of Object.entries(report.scanners || {})) {
     if (!findings.length) continue;
     const box = el("div", { class: "scanner" });
@@ -1146,6 +1204,12 @@ form.addEventListener("submit", async (e) => {
 // renderProgressSkeleton()'s fixed list.
 let lastBatchResult = null;
 let batchRepoPathToStepKey = {};
+// Repo name for each path discovered by an org scan -- a failed repo has
+// no report yet (mergeReportIntoResult only runs on success), so this is
+// what attachRetryButton uses for keep_clone retries' repo_name, letting
+// the retried clone's dashboard row show a real name instead of falling
+// all the way back to the bare clone URL.
+let batchRepoPathToName = {};
 // Repos successfully re-scanned via the per-repo Retry button, keyed by
 // their identifying path -- the original batch/org scan's own "done" event
 // has no idea a retry happened (it's a separate /api/scan/stream request),
@@ -1153,7 +1217,7 @@ let batchRepoPathToStepKey = {};
 // the retry would otherwise get silently discarded the moment the run
 // finishes. See handleBatchSSELine's "done" branch.
 let retriedReports = new Map();
-// Identifying key (source_path/repo_name/source_url) of the repo row the
+// Identifying key (repo_name/source_url/source_path) of the repo row the
 // user last clicked View report/Fix on -- re-applied as the "active"
 // highlight every time the dashboard re-renders (live updates mid-run,
 // returning via "Back to all repos"), not just at click time.
@@ -1163,7 +1227,7 @@ let batchFilterText = "";
 let batchFilterStatus = "all";
 
 function repoRowKey(report) {
-  return report.source_path || report.repo_name || report.source_url || "";
+  return report.repo_name || report.source_url || report.source_path || "";
 }
 
 function renderBatchDashboard(data) {
@@ -1228,11 +1292,14 @@ function renderBatchDashboard(data) {
     const rowClasses = ["batch-row", total ? "dirty" : "clean"];
     if (rowKey && rowKey === activeBatchRepoKey) rowClasses.push("active");
     const row = el("div", { class: rowClasses.join(" ") });
-    row.dataset.repoName = (report.source_path || report.repo_name || report.source_url || "").toLowerCase();
+    row.dataset.repoName = (report.repo_name || report.source_url || report.source_path || "").toLowerCase();
     row.dataset.status = total ? "dirty" : "clean";
-    row.appendChild(el("span", { class: "batch-row-name", text: report.source_path || report.repo_name || report.source_url }));
+    row.appendChild(el("span", { class: "batch-row-name", text: report.repo_name || report.source_url || report.source_path }));
 
     const badges = el("span", { class: "batch-row-badges" });
+    if (report.fixed) {
+      badges.appendChild(el("span", { class: "badge fixed", text: "✓ fixed", title: "History rewritten and pushed via Recovery" }));
+    }
     if (total === 0) {
       badges.appendChild(el("span", { class: "badge low", text: "clean" }));
     } else {
@@ -1263,6 +1330,19 @@ function renderBatchDashboard(data) {
         triggerRecoverAnalyze();
       });
       row.appendChild(fixBtn);
+    }
+
+    if (report.clone_id) {
+      const deleteCloneBtn = el("button", {
+        type: "button",
+        class: "btn-secondary",
+        text: "Delete clone",
+        title: "Delete this repo's kept clone from disk",
+      });
+      deleteCloneBtn.addEventListener("click", () => {
+        deleteReportClone(report, deleteCloneBtn, () => renderBatchDashboard(lastBatchResult));
+      });
+      row.appendChild(deleteCloneBtn);
     }
 
     table.appendChild(row);
@@ -1300,8 +1380,11 @@ function csvCell(value) {
 function exportFindingsCsv(data) {
   const rows = [["RepoName", "files", "issue", "status"]];
   for (const report of data.repos) {
-    const repoName = report.repo_name || report.source_path || report.source_url || "";
-    const repoKey = report.source_path || report.repo_name || report.source_url || "";
+    const repoName = report.repo_name || report.source_url || report.source_path || "";
+    // Must match renderReport's repoKey exactly -- both key into the same
+    // findingChecked map, so a mismatch here would silently export every
+    // finding as checked regardless of what the user actually triaged.
+    const repoKey = report.repo_name || report.source_url || report.source_path || "";
     for (const [scannerKey, findings] of Object.entries(report.scanners || {})) {
       findings.forEach((f, i) => {
         const fKey = findingKey(repoKey, scannerKey, i);
@@ -1331,10 +1414,11 @@ function showBatchRepoDetail(report) {
   // list once you've viewed any single repo's report.
   renderReport(report);
   lastScanReport = report;
-  // Org-scan repos have no source_path (their clone is already gone by the
-  // time the browser sees the report) -- Recovery needs a live directory,
-  // so there's nothing to show a panel for.
+  // A repo whose kept clone was deleted (see deleteReportClone) has no
+  // source_path anymore -- Recovery needs a live directory, so hide the
+  // panel rather than leaving it pointed at a directory that's now gone.
   if (report.source_path) showRecoveryPanel(report.source_path);
+  else hideRecoveryPanel();
 
   const results = document.getElementById("results");
   const backBtn = el("button", { type: "button", class: "btn-secondary back-to-batch-btn", text: "← Back to all repos" });
@@ -1355,7 +1439,7 @@ function mergeReportIntoResult(result, report, repoKey) {
     (r) => r.source_path !== repoKey && r.source_url !== repoKey && r.repo_name !== repoKey
   );
   result.repos.push(report);
-  const displayKey = (r) => r.source_path || r.repo_name || r.source_url || "";
+  const displayKey = (r) => r.repo_name || r.source_url || r.source_path || "";
   result.repos.sort((a, b) => displayKey(a).localeCompare(displayKey(b)));
 
   result.total_repos = result.repos.length;
@@ -1384,9 +1468,11 @@ function handleBatchSSELine(raw, status, results, payload) {
       status.textContent = data.label;
       if (data.done && data.repos && data.repos.length) {
         batchRepoPathToStepKey = {};
+        batchRepoPathToName = {};
         const steps = data.repos.map((r, i) => {
           const key = `repo-${i}`;
           batchRepoPathToStepKey[r.path] = key;
+          batchRepoPathToName[r.path] = r.name;
           return { key, label: r.name };
         });
         appendProgressSteps("progress", "batch-step", steps);
@@ -1450,9 +1536,11 @@ function handleBatchSSELine(raw, status, results, payload) {
 // Re-scans one repo via the normal single-scan endpoint (which already
 // handles both a local path and a git URL) instead of re-running the whole
 // batch/org scan. For an org-scan repo (repoPath is its clone_url), this
-// also means its clone is kept afterward like any single URL scan's --
-// unlike the original ephemeral org-scan pass, a retried repo *does* get
-// Recovery/"View file" support, since its clone genuinely still exists.
+// passes keep_clone so the retried repo's clone is kept the same tracked
+// way _scan_one's is (see webapp.py's ScanRequest.keep_clone) rather than
+// parked in the single top-level scan's one-slot _last_scan_clone, where
+// an unrelated scan (or another retry) moments later would silently
+// delete it out from under whoever's still looking at this repo's report.
 function attachRetryButton(key, repoPath, payload) {
   const row = document.getElementById(`batch-step-${key}`);
   if (!row) return;
@@ -1467,7 +1555,13 @@ function attachRetryButton(key, repoPath, payload) {
     setStep("batch-step", key, { state: "running", label: "Retrying..." });
 
     const singlePayload = payload.org
-      ? { url: repoPath, scanners: payload.scanners, ...(payload.token ? { token: payload.token } : {}) }
+      ? {
+          url: repoPath,
+          scanners: payload.scanners,
+          keep_clone: true,
+          repo_name: batchRepoPathToName[repoPath] || repoPath,
+          ...(payload.token ? { token: payload.token } : {}),
+        }
       : { path: repoPath, scanners: payload.scanners };
 
     let succeeded = false;
@@ -1677,6 +1771,114 @@ browseModal.addEventListener("click", (e) => {
   if (e.target === browseModal) browseModal.classList.add("hidden");
 });
 
+// --- temp clones (kept org/batch-scan clones) ------------------------------
+// A single-URL scan's clone is replaced by the next one automatically (see
+// _last_scan_clone), but an org/batch scan can produce far too many to do
+// that with, so each successfully-scanned repo's clone is instead kept on
+// disk under KEPT_CLONE_PREFIX until deleted here -- this panel just lists
+// whatever /api/temp-clones finds on disk right now, not anything tracked
+// client-side, so it stays correct across page reloads.
+const clonesModal = document.getElementById("clones-modal");
+const clonesList = document.getElementById("clones-list");
+const clonesTotal = document.getElementById("clones-total");
+
+function formatBytes(n) {
+  if (!n) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function formatAge(unixSeconds) {
+  if (!unixSeconds) return "";
+  const secs = Math.max(0, Date.now() / 1000 - unixSeconds);
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
+}
+
+async function loadClones() {
+  clonesList.innerHTML = "";
+  clonesTotal.textContent = "Loading…";
+  let clones;
+  try {
+    const resp = await fetch("/api/temp-clones");
+    ({ clones } = await resp.json());
+  } catch (err) {
+    clonesTotal.textContent = String(err.message || err);
+    return;
+  }
+
+  if (!clones.length) {
+    clonesList.appendChild(el("div", { class: "clones-empty", text: "No kept clones — org/batch scans keep each repo's clone here until you delete it." }));
+    clonesTotal.textContent = "";
+    return;
+  }
+
+  for (const clone of clones) {
+    const info = el(
+      "div", { class: "clone-info" },
+      el("div", { class: "clone-repo-name", text: clone.repo_name || clone.id }),
+      el("div", { class: "clone-meta", text: `${formatBytes(clone.size_bytes)} · ${formatAge(clone.created_at)} · ${clone.path}` }),
+    );
+    const openBtn = el("button", { type: "button", class: "btn-secondary", text: "Open in folder" });
+    openBtn.addEventListener("click", async () => {
+      try {
+        await fetch("/api/open-folder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: clone.path }),
+        });
+      } catch (err) { /* fire-and-forget, same as the report view's action */ }
+    });
+    const deleteBtn = el("button", { type: "button", class: "btn-secondary", text: "Delete" });
+    deleteBtn.addEventListener("click", async () => {
+      if (!confirm(`Delete the kept clone for ${clone.repo_name || clone.id}? This can't be undone.`)) return;
+      deleteBtn.disabled = true;
+      deleteBtn.textContent = "Deleting…";
+      openBtn.disabled = true;
+      try {
+        await fetch(`/api/temp-clones/${encodeURIComponent(clone.id)}`, { method: "DELETE" });
+      } finally {
+        loadClones();
+      }
+    });
+    clonesList.appendChild(el("div", { class: "clone-row" }, info, openBtn, deleteBtn));
+  }
+
+  const totalBytes = clones.reduce((sum, c) => sum + (c.size_bytes || 0), 0);
+  clonesTotal.textContent = `${clones.length} clone(s), ${formatBytes(totalBytes)} total`;
+}
+
+document.getElementById("open-clones-modal-btn").addEventListener("click", () => {
+  clonesModal.classList.remove("hidden");
+  loadClones();
+});
+
+document.getElementById("clones-modal-close-btn").addEventListener("click", () => {
+  clonesModal.classList.add("hidden");
+});
+
+clonesModal.addEventListener("click", (e) => {
+  if (e.target === clonesModal) clonesModal.classList.add("hidden");
+});
+
+const clonesDeleteAllBtn = document.getElementById("clones-delete-all-btn");
+clonesDeleteAllBtn.addEventListener("click", async () => {
+  if (!confirm("Delete all kept clones? This can't be undone.")) return;
+  clonesDeleteAllBtn.disabled = true;
+  clonesDeleteAllBtn.textContent = "Deleting…";
+  try {
+    await fetch("/api/temp-clones", { method: "DELETE" });
+  } finally {
+    clonesDeleteAllBtn.disabled = false;
+    clonesDeleteAllBtn.textContent = "Delete all";
+    loadClones();
+  }
+});
+
 // --- recovery (history rewrite) -------------------------------------------
 // Offered for both local-path and URL scans -- a URL scan's clone is now
 // kept on the server after scanning (replaced by the *next* URL scan's
@@ -1704,6 +1906,7 @@ const RECOVER_ANALYZE_STEP_ORDER = [
   { key: "camouflage", label: "Check for camouflage commits" },
   { key: "vscode", label: "Check risky VS Code task configuration" },
   { key: "vscode_history", label: "Check historical tasks.json blobs" },
+  { key: "paths", label: "Map affected blobs to file paths" },
 ];
 
 const recoveryPanel = document.getElementById("recovery-panel");
@@ -1721,12 +1924,17 @@ const recoverRemoveTasksBtn = document.getElementById("recover-remove-tasks-btn"
 const recoverRemoveTasksResult = document.getElementById("recover-remove-tasks-result");
 
 let recoveryScanPath = null;
+// Paths the user has unchecked in the analyze preview's per-file list --
+// those blobs are left untouched by the rewrite ("checked files only").
+// Absence means checked/included, the default every file starts in.
+const recoverExcludedPaths = new Set();
 
 function showRecoveryPanel(path) {
   recoveryScanPath = path;
   recoveryPanel.classList.remove("hidden");
   recoverApplySection.classList.add("hidden");
   recoverAnalyzeResult.innerHTML = "";
+  recoverExcludedPaths.clear();
   document.getElementById("recover-analyze-progress").innerHTML = "";
   document.getElementById("recover-analyze-status").textContent = "";
   document.getElementById("recover-progress").innerHTML = "";
@@ -1807,8 +2015,63 @@ recoverPushCheckbox.addEventListener("change", () => {
   updateRecoverApplyButton();
 });
 
+function renderFilesChecklist(files) {
+  const box = el("div", { class: "scanner" });
+  const header = el("h2", { text: `Files affected (${files.length}) — uncheck any to leave them out of the rewrite` });
+  const headerActions = el("span", { class: "scanner-select-actions" });
+  const checkAllLink = el("a", { text: "check all" });
+  const uncheckAllLink = el("a", { text: "uncheck all" });
+  headerActions.appendChild(checkAllLink);
+  headerActions.appendChild(document.createTextNode(" · "));
+  headerActions.appendChild(uncheckAllLink);
+  header.appendChild(headerActions);
+  box.appendChild(header);
+
+  // Collected as rows are built below so the check-all/uncheck-all links
+  // (in the header, built first) can toggle every checkbox at once -- by
+  // the time either is clickable the loop below has already run.
+  const fileCheckboxes = [];
+  for (const f of files) {
+    const parts = [];
+    if (f.line_findings) parts.push(`${f.line_findings} line match(es)`);
+    if (f.clock_tamper) parts.push("clock-tamper");
+    if (f.masquerade) parts.push("masquerade");
+    if (f.vscode_task) parts.push("historical risky tasks.json");
+    const row = el("div", { class: "finding" });
+    const checkbox = el("input", { type: "checkbox", class: "finding-checkbox" });
+    checkbox.checked = !recoverExcludedPaths.has(f.path);
+    checkbox.title = "Uncheck to leave this file's blobs untouched by the rewrite";
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) recoverExcludedPaths.delete(f.path);
+      else recoverExcludedPaths.add(f.path);
+    });
+    fileCheckboxes.push({ checkbox, path: f.path });
+    row.appendChild(checkbox);
+    row.appendChild(document.createTextNode(` ${f.path} — ${parts.join(", ")}`));
+    box.appendChild(row);
+  }
+
+  checkAllLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    fileCheckboxes.forEach(({ checkbox, path }) => {
+      checkbox.checked = true;
+      recoverExcludedPaths.delete(path);
+    });
+  });
+  uncheckAllLink.addEventListener("click", (e) => {
+    e.preventDefault();
+    fileCheckboxes.forEach(({ checkbox, path }) => {
+      checkbox.checked = false;
+      recoverExcludedPaths.add(path);
+    });
+  });
+
+  return box;
+}
+
 function renderRecoverAnalyzeResult(data) {
   recoverAnalyzeResult.innerHTML = "";
+  recoverExcludedPaths.clear();
   const willClean =
     data.findings_count > 0 ||
     data.clock_tamper_blobs_count > 0 ||
@@ -1835,6 +2098,10 @@ function renderRecoverAnalyzeResult(data) {
       })
     );
     recoverAnalyzeResult.appendChild(summary);
+
+    if (data.files && data.files.length) {
+      recoverAnalyzeResult.appendChild(renderFilesChecklist(data.files));
+    }
 
     if (data.preview.length) {
       const box = el("div", { class: "scanner" });
@@ -2009,6 +2276,11 @@ function handleRecoverySSELine(raw, status, result, stepOrder) {
       return;
     }
     status.textContent = data.pushed ? "History rewritten and pushed." : "History rewritten (not pushed).";
+    // Recovery never touches source_path itself -- only a disposable mirror
+    // clone, published to origin (or not) depending on push -- so only a
+    // pushed rewrite actually changed anything anyone will see again;
+    // that's what the batch dashboard's "fixed" badge is meant to reflect.
+    if (data.pushed && lastScanReport) lastScanReport.fixed = true;
     const summary = el("div", { class: "summary clean" });
     summary.appendChild(
       el("strong", {
@@ -2043,6 +2315,7 @@ recoverApplyBtn.addEventListener("click", async () => {
   const push = recoverPushCheckbox.checked;
 
   const payload = { path: recoveryScanPath, confirm: recoverConfirmInput.value, push };
+  if (recoverExcludedPaths.size) payload.excluded_paths = Array.from(recoverExcludedPaths);
   if (push) {
     payload.push_confirm = recoverPushConfirmInput.value;
     const token = recoverPushTokenInput.value.trim();
@@ -2124,6 +2397,33 @@ async function openInFileExplorer(repoPath, filePath, btn) {
       btn.textContent = originalText;
       btn.title = "";
     }, 2000);
+  }
+}
+
+// Deletes a single org-scan repo's kept clone (see KEPT_CLONE_PREFIX / the
+// "Temp clones" panel) from wherever its report is shown -- the batch
+// dashboard row and the per-repo detail view both call this instead of
+// making the user go find it in the panel. `report.clone_id` only exists
+// on org-scan reports (see _scan_one), so callers gate on that rather than
+// showing this for a local batch scan's own directory or a single-URL
+// scan's report, neither of which this endpoint is meant to touch.
+async function deleteReportClone(report, btn, onDeleted) {
+  if (!confirm(`Delete the kept clone for ${report.repo_name || report.source_url}? This can't be undone.`)) return;
+  btn.disabled = true;
+  btn.textContent = "Deleting…";
+  try {
+    const resp = await fetch(`/api/temp-clones/${encodeURIComponent(report.clone_id)}`, { method: "DELETE" });
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${resp.status}`);
+    }
+    delete report.source_path;
+    delete report.clone_id;
+    onDeleted();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "Delete clone";
+    btn.title = String(err.message || err);
   }
 }
 

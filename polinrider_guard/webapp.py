@@ -17,9 +17,10 @@ Never binds to a public interface by default. Several distinct exposure
 risks if you do: the "server clones whatever URL you give it" behavior is
 SSRF-shaped, local-path scanning and the file viewer reflect file contents
 back to whoever can reach the port, and a scanned repo's clone persists on
-the server's disk until the next URL scan replaces it -- all only
-acceptable on localhost, or behind your own auth, if you ever pass a
-non-loopback --host.
+the server's disk until the next URL scan replaces it -- or, for an org/
+batch scan, until manually deleted via the "Temp clones" panel (see
+KEPT_CLONE_PREFIX) -- all only acceptable on localhost, or behind your own
+auth, if you ever pass a non-loopback --host.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,6 +70,17 @@ CONFIRM_REMOVE_TASK_PHRASE = "REMOVE TASK"
 
 STATIC_DIR = Path(__file__).parent / "web_static"
 CLONE_TIMEOUT_SECONDS = 300  # full clones take longer than the old --depth 1 ones
+
+# Org/batch-scan clones that finished successfully are kept on disk under
+# this prefix (in the OS temp dir) instead of being discarded like a failed
+# or in-progress one still is -- an org scan can be up to MAX_BATCH_REPOS
+# repos, so nothing tracks them in memory; the "Temp clones" panel and its
+# /api/temp-clones endpoints below just re-derive the list by walking the
+# temp dir for this prefix each time, using KEPT_CLONE_META_FILENAME (written
+# once a repo's scan succeeds, see _scan_one) to tell a kept clone apart from
+# one still mid-clone/mid-scan or one that already failed and was removed.
+KEPT_CLONE_PREFIX = "polinrider-guard-org-"
+KEPT_CLONE_META_FILENAME = ".polinrider-guard-clone.json"
 
 # The most recent URL-sourced scan's clone directory. Kept alive after
 # scanning finishes (unlike the old "clone, scan, delete" flow) so Recovery
@@ -158,6 +171,17 @@ class ScanRequest(BaseModel):
     path: str | None = None
     token: str | None = None
     scanners: list[str] | None = None
+    # Set by the batch/org dashboard's per-repo Retry button (see
+    # attachRetryButton in index.html): that button reuses this same
+    # single-repo scan endpoint rather than duplicating _run_org_scan's
+    # clone-and-scan logic, so it needs _run_scan to keep the clone the
+    # same way _scan_one does (KEPT_CLONE_PREFIX, tracked, not silently
+    # replaced by the next scan) instead of parking it in the single
+    # top-level scan's one-slot _last_scan_clone, where an unrelated scan
+    # (or another retry) started moments later would delete it out from
+    # under whoever's still looking at this repo's report.
+    keep_clone: bool = False
+    repo_name: str | None = None
 
 
 _VALID_SCANNER_KEYS = {key for key, _ in SCANNER_STEPS}
@@ -223,12 +247,132 @@ def _looks_like_auth_error(stderr: str) -> bool:
     return any(marker in low for marker in _AUTH_ERROR_MARKERS)
 
 
+# git only prints "Receiving objects: 45% (450/1000), ..." style percent
+# lines when it thinks stderr is a terminal, hence the --progress flag
+# callers pass to force them anyway. Each phase (Enumerating/Counting/
+# Compressing objects, Receiving objects, Resolving deltas) resets its own
+# done/total from zero, so this is only meaningful within one phase, not
+# as a fraction of the whole clone -- callers label it with the phase name
+# for that reason instead of just showing a bare percent.
+_GIT_CLONE_PROGRESS_RE = re.compile(
+    r"^(?:remote: )?([A-Za-z][A-Za-z ]*?):\s+\d{1,3}%\s+\((\d+)/(\d+)\)"
+)
+
+
+def _run_clone_with_progress(
+    cmd: list[str], env: dict, timeout: int
+) -> Generator[tuple[str, int, int], None, tuple[int, str]]:
+    """Run a `git clone --progress ...` command, yielding (phase, done,
+    total) as each percent line shows up on stderr, then returning
+    (returncode, full_stderr_text) once the process exits.
+
+    Progress lines are \\r-terminated (in-place terminal updates) rather
+    than \\n-terminated, so stderr is read byte-by-byte here instead of
+    through Popen's normal line iteration, which would just block until
+    the whole clone finished before yielding anything.
+    """
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env
+    )
+    timed_out = False
+
+    def _kill_on_timeout() -> None:
+        nonlocal timed_out
+        timed_out = True
+        proc.kill()
+
+    timer = threading.Timer(timeout, _kill_on_timeout)
+    timer.start()
+    lines: list[str] = []
+    try:
+        buf = ""
+        while True:
+            ch = proc.stderr.read(1)
+            if ch == "":
+                break
+            if ch in ("\r", "\n"):
+                if buf:
+                    lines.append(buf)
+                    match = _GIT_CLONE_PROGRESS_RE.match(buf.strip())
+                    if match:
+                        yield (match.group(1).strip(), int(match.group(2)), int(match.group(3)))
+                    buf = ""
+            else:
+                buf += ch
+        if buf:
+            lines.append(buf)
+        proc.wait()
+    finally:
+        timer.cancel()
+
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    return proc.returncode, "\n".join(lines)
+
+
 def _rmtree_force(path: Path) -> None:
     def _on_error(func, p, exc_info):
         os.chmod(p, stat.S_IWRITE)
         func(p)
 
     shutil.rmtree(path, onerror=_on_error)
+
+
+def _remember_kept_clone(tmpdir: Path, repo_name: str, clone_url: str) -> None:
+    meta = {"repo_name": repo_name, "clone_url": clone_url, "created_at": time.time()}
+    (tmpdir / KEPT_CLONE_META_FILENAME).write_text(jsonlib.dumps(meta))
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for name in filenames:
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+            except OSError:
+                pass
+    return total
+
+
+def _list_kept_clones() -> list[dict]:
+    temp_root = Path(tempfile.gettempdir())
+    clones = []
+    for child in temp_root.iterdir():
+        if not child.name.startswith(KEPT_CLONE_PREFIX) or not child.is_dir():
+            continue
+        meta_path = child / KEPT_CLONE_META_FILENAME
+        if not meta_path.exists():
+            continue  # still mid-clone/mid-scan, or failed and already removed
+        try:
+            meta = jsonlib.loads(meta_path.read_text())
+        except (OSError, ValueError):
+            continue
+        clones.append(
+            {
+                "id": child.name,
+                "path": str(child),
+                "repo_name": meta.get("repo_name"),
+                "clone_url": meta.get("clone_url"),
+                "created_at": meta.get("created_at"),
+                "size_bytes": _dir_size(child),
+            }
+        )
+    clones.sort(key=lambda c: c["created_at"] or 0, reverse=True)
+    return clones
+
+
+def _resolve_kept_clone_dir(clone_id: str) -> Path:
+    """Validate `clone_id` (a temp-dir basename from _list_kept_clones)
+    before deleting it -- rejects anything that isn't a bare directory
+    name under KEPT_CLONE_PREFIX, so a path-traversal id (e.g. "../..")
+    can't be used to delete something outside the OS temp dir.
+    """
+    if "/" in clone_id or "\\" in clone_id or not clone_id.startswith(KEPT_CLONE_PREFIX):
+        raise HTTPException(400, "invalid clone id")
+    path = Path(tempfile.gettempdir()) / clone_id
+    if not path.is_dir() or not (path / KEPT_CLONE_META_FILENAME).exists():
+        raise HTTPException(404, "clone not found")
+    return path
 
 
 # Batch-scan: point the local-path field at a parent folder (e.g. a
@@ -557,18 +701,18 @@ class OrgScanRequest(BaseModel):
 
 
 def _run_org_scan(login: str, token: str | None, scanners: list[str] | None = None) -> Generator[tuple[str, dict], None, None]:
-    """List every repo under a GitHub org/user account, then clone, scan,
-    and immediately discard each one in turn (bounded concurrency, same
-    BATCH_SCAN_MAX_WORKERS as _run_batch_scan). Clones are ephemeral rather
-    than kept around like a single URL scan's _last_scan_clone: an org can
-    be arbitrarily large, and there's no single "most recent" slot to reuse
-    the way one repo has. Emits the identical event shape _run_batch_scan
-    does (progress/discover with repos+truncated, progress/repo, done)
-    so the web UI's existing batch-dashboard renderer works on it
-    unmodified. Per-repo reports have no source_path (their clone is gone
-    by the time the browser sees them) -- the file viewer/Recovery/"Open in
-    folder" actions on one naturally fail with an honest "path does not
-    exist" error rather than needing special-casing in the UI for it.
+    """List every repo under a GitHub org/user account, then clone and scan
+    each one in turn (bounded concurrency, same BATCH_SCAN_MAX_WORKERS as
+    _run_batch_scan). Unlike a single URL scan's _last_scan_clone (one slot,
+    replaced by the next scan), a successfully scanned repo's clone here is
+    kept on disk indefinitely under KEPT_CLONE_PREFIX -- an org can be
+    arbitrarily large, so nothing caps or auto-expires them; the user
+    reviews/deletes them manually via the "Temp clones" panel and its
+    /api/temp-clones endpoints. A clone that failed or timed out is still
+    discarded immediately, same as before. Emits the identical event shape
+    _run_batch_scan does (progress/discover with repos+truncated,
+    progress/repo, done) so the web UI's existing batch-dashboard renderer
+    works on it unmodified.
     """
     yield ("progress", {"step": "discover", "label": f"Listing repositories for {login}..."})
 
@@ -606,15 +750,22 @@ def _run_org_scan(login: str, token: str | None, scanners: list[str] | None = No
             clone_target = _inject_token(clone_url, token) if token else clone_url
             env = os.environ.copy()
             env["GIT_TERMINAL_PROMPT"] = "0"
-            clone_result = subprocess.run(
-                ["git", "clone", clone_target, str(tmpdir)],
-                capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECONDS, env=env,
+            clone_progress = _run_clone_with_progress(
+                ["git", "clone", "--progress", clone_target, str(tmpdir)], env, CLONE_TIMEOUT_SECONDS
             )
-            if clone_result.returncode != 0:
-                stderr = clone_result.stderr.strip()[-500:]
+            while True:
+                try:
+                    phase, done, total = next(clone_progress)
+                except StopIteration as stop:
+                    clone_returncode, clone_stderr = stop.value
+                    break
+                event_queue.put(("clone_progress", clone_url, (phase, done, total)))
+            if clone_returncode != 0:
+                stderr = clone_stderr.strip()[-500:]
                 if token:
                     stderr = stderr.replace(clone_target, clone_url).replace(token, "***")
                 event_queue.put(("error", clone_url, f"clone failed: {stderr}"))
+                _rmtree_force(tmpdir)
                 return
 
             progress_lock = threading.Lock()
@@ -632,15 +783,25 @@ def _run_org_scan(login: str, token: str | None, scanners: list[str] | None = No
             report = guard.run_guard(tmpdir, include_git=True, scanners=scanners, on_progress=on_progress)
         except subprocess.TimeoutExpired:
             event_queue.put(("error", clone_url, "clone timed out"))
+            _rmtree_force(tmpdir)
             return
         except Exception as exc:
             event_queue.put(("error", clone_url, str(exc)))
-            return
-        finally:
             _rmtree_force(tmpdir)
+            return
 
+        # Unlike a failed/timed-out clone above, a successfully scanned one
+        # is kept on disk rather than discarded -- see KEPT_CLONE_PREFIX --
+        # so the user can inspect it or hand it to Recovery/the file viewer
+        # from the "Temp clones" panel, and delete it manually once done.
+        _remember_kept_clone(tmpdir, repo["full_name"], clone_url)
         report["source_url"] = clone_url
         report["repo_name"] = repo["full_name"]
+        report["source_path"] = str(tmpdir)
+        # tmpdir.name doubles as the id /api/temp-clones/{clone_id} expects,
+        # so the UI can offer a per-repo "Delete clone" action without the
+        # browser having to parse a basename out of source_path itself.
+        report["clone_id"] = tmpdir.name
         event_queue.put(("finished", clone_url, report))
 
     reports: list[dict] = []
@@ -652,7 +813,18 @@ def _run_org_scan(login: str, token: str | None, scanners: list[str] | None = No
         while remaining > 0:
             kind, clone_url, payload = event_queue.get()
             if kind == "started":
-                yield ("progress", {"step": "repo", "repo_path": clone_url, "label": f"{clone_url}: scanning..."})
+                yield ("progress", {"step": "repo", "repo_path": clone_url, "label": f"{clone_url}: cloning..."})
+            elif kind == "clone_progress":
+                phase, done, total = payload
+                yield (
+                    "progress",
+                    {
+                        "step": "repo",
+                        "repo_path": clone_url,
+                        "label": f"{clone_url}: cloning ({phase} {done}/{total})",
+                        "file_progress": {"done": done, "total": total},
+                    },
+                )
             elif kind == "repo_progress":
                 done, total = payload
                 yield (
@@ -749,12 +921,34 @@ def org_scan_stream(req: OrgScanRequest) -> StreamingResponse:
     )
 
 
+@app.get("/api/temp-clones")
+def list_temp_clones() -> JSONResponse:
+    return JSONResponse({"clones": _list_kept_clones()})
+
+
+@app.delete("/api/temp-clones/{clone_id}")
+def delete_temp_clone(clone_id: str) -> JSONResponse:
+    path = _resolve_kept_clone_dir(clone_id)
+    _rmtree_force(path)
+    return JSONResponse({"deleted": [clone_id]})
+
+
+@app.delete("/api/temp-clones")
+def delete_all_temp_clones() -> JSONResponse:
+    deleted = [c["id"] for c in _list_kept_clones()]
+    for clone_id in deleted:
+        _rmtree_force(Path(tempfile.gettempdir()) / clone_id)
+    return JSONResponse({"deleted": deleted})
+
+
 def _run_scan(
     url: str | None,
     ref: str | None,
     path: str | None,
     token: str | None,
     scanners: list[str] | None = None,
+    keep_clone: bool = False,
+    repo_name: str | None = None,
 ) -> Generator[tuple[str, dict], None, None]:
     """Do the clone-or-locate + scan work, yielding (event, data) pairs:
     any number of "progress" events, then exactly one "done" (with the
@@ -767,6 +961,14 @@ def _run_scan(
     `scanners`, if given, restricts which of SCANNER_STEPS actually run
     (a user's checkbox selection in the UI); the rest are reported with
     an empty findings list so the report shape is unaffected by selection.
+
+    `keep_clone` switches the clone from the single top-level scan's one
+    slot (_last_scan_clone, replaced by the next such call) to a tracked
+    KEPT_CLONE_PREFIX one like _scan_one's, left alone by every other
+    scan -- set by the batch/org dashboard's per-repo Retry button, which
+    calls this same endpoint for one repo rather than duplicating
+    _run_org_scan's clone-and-scan logic. `repo_name`, if given, is only
+    used for that kept-clone's metadata/display.
     """
     global _last_scan_clone
 
@@ -774,18 +976,21 @@ def _run_scan(
         root = Path(path).resolve()
         yield ("progress", {"step": "clone", "label": f"Using local path {root}", "done": True})
     else:
-        with _last_scan_clone_lock:
-            if _last_scan_clone is not None and _last_scan_clone.exists():
-                _rmtree_force(_last_scan_clone)
-            _last_scan_clone = None
+        if keep_clone:
+            tmpdir = Path(tempfile.mkdtemp(prefix=KEPT_CLONE_PREFIX))
+        else:
+            with _last_scan_clone_lock:
+                if _last_scan_clone is not None and _last_scan_clone.exists():
+                    _rmtree_force(_last_scan_clone)
+                _last_scan_clone = None
 
-        tmpdir = Path(tempfile.mkdtemp(prefix="polinrider-guard-web-"))
+            tmpdir = Path(tempfile.mkdtemp(prefix="polinrider-guard-web-"))
         root = tmpdir
 
         yield ("progress", {"step": "clone", "label": f"Cloning {url}..."})
 
         clone_url = _inject_token(url, token) if token else url
-        cmd = ["git", "clone"]
+        cmd = ["git", "clone", "--progress"]
         if ref:
             cmd += ["--branch", ref]
         cmd += [clone_url, str(tmpdir)]
@@ -794,16 +999,28 @@ def _run_scan(
         env["GIT_TERMINAL_PROMPT"] = "0"
 
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECONDS, env=env
-            )
+            clone_progress = _run_clone_with_progress(cmd, env, CLONE_TIMEOUT_SECONDS)
+            while True:
+                try:
+                    phase, done, total = next(clone_progress)
+                except StopIteration as stop:
+                    returncode, stderr_text = stop.value
+                    break
+                yield (
+                    "progress",
+                    {
+                        "step": "clone",
+                        "label": f"Cloning {url}: {phase} ({done}/{total})",
+                        "file_progress": {"done": done, "total": total},
+                    },
+                )
         except subprocess.TimeoutExpired:
             yield ("error", {"message": "git clone timed out"})
             _rmtree_force(tmpdir)
             return
 
-        if result.returncode != 0:
-            stderr = result.stderr.strip()[-2000:]
+        if returncode != 0:
+            stderr = stderr_text.strip()[-2000:]
             if token:
                 stderr = stderr.replace(clone_url, url).replace(token, "***")
             message = f"git clone failed: {stderr}"
@@ -820,11 +1037,14 @@ def _run_scan(
 
         yield ("progress", {"step": "clone", "label": "Clone complete", "done": True})
 
-        # Kept alive from here on (not cleaned up in a finally below) so
-        # Recovery and the file viewer can reuse it after this scan
-        # finishes; replaced on the next URL scan, not before.
-        with _last_scan_clone_lock:
-            _last_scan_clone = tmpdir
+        if keep_clone:
+            _remember_kept_clone(tmpdir, repo_name or url, url)
+        else:
+            # Kept alive from here on (not cleaned up in a finally below) so
+            # Recovery and the file viewer can reuse it after this scan
+            # finishes; replaced on the next URL scan, not before.
+            with _last_scan_clone_lock:
+                _last_scan_clone = tmpdir
 
     # Scanners the caller didn't select are reported as an empty findings
     # list rather than omitted, so the report shape (and STEP_ORDER-driven
@@ -909,6 +1129,9 @@ def _run_scan(
     if url:
         report["source_url"] = url
     report["source_path"] = str(root)
+    if keep_clone:
+        report["repo_name"] = repo_name or url
+        report["clone_id"] = root.name
     yield ("done", report)
 
 
@@ -922,7 +1145,9 @@ def scan(req: ScanRequest) -> JSONResponse:
 
     report = None
     error_message = None
-    for event, data in _run_scan(req.url, req.ref, req.path, req.token, req.scanners):
+    for event, data in _run_scan(
+        req.url, req.ref, req.path, req.token, req.scanners, req.keep_clone, req.repo_name
+    ):
         if event == "done":
             report = data
         elif event == "error":
@@ -938,7 +1163,9 @@ def scan_stream(req: ScanRequest) -> StreamingResponse:
     _validate_request(req)
 
     def generate():
-        for event, data in _run_scan(req.url, req.ref, req.path, req.token, req.scanners):
+        for event, data in _run_scan(
+            req.url, req.ref, req.path, req.token, req.scanners, req.keep_clone, req.repo_name
+        ):
             yield _sse(event, data)
 
     return StreamingResponse(
@@ -958,6 +1185,7 @@ class RecoveryApplyRequest(BaseModel):
     push: bool = False
     push_confirm: str | None = None
     token: str | None = None
+    excluded_paths: list[str] = []
 
 
 class RecoveryRemoveTasksRequest(BaseModel):
@@ -1012,6 +1240,7 @@ _RECOVER_ANALYZE_LABELS = {
     "camouflage": "Checking for camouflage commits...",
     "vscode": "Checking risky VS Code task configuration...",
     "vscode_history": "Checking historical tasks.json blobs across history...",
+    "paths": "Mapping affected blobs to file paths...",
 }
 
 
@@ -1106,6 +1335,32 @@ def _run_recover_analyze(root: Path) -> Generator[tuple[str, dict], None, None]:
 
     line_findings, clock_tamper_blobs = blob_result
     blobs_affected = sorted({sha for sha, _, _ in line_findings})
+
+    yield ("progress", {"step": "paths", "label": "Mapping affected blobs to file paths..."})
+    path_map = recovery.blob_paths(root)
+    files: dict[str, dict] = {}
+
+    def _touch(sha: str, key: str) -> None:
+        for path in path_map.get(sha, ()):
+            entry = files.setdefault(
+                path, {"path": path, "line_findings": 0, "clock_tamper": False, "masquerade": False, "vscode_task": False}
+            )
+            if key == "line_findings":
+                entry["line_findings"] += 1
+            else:
+                entry[key] = True
+
+    for sha, _line, _line_no in line_findings:
+        _touch(sha, "line_findings")
+    for sha, _indicators in clock_tamper_blobs:
+        _touch(sha, "clock_tamper")
+    for sha, _path in masquerade_blobs:
+        _touch(sha, "masquerade")
+    for sha, _path in vscode_task_blobs:
+        _touch(sha, "vscode_task")
+    files_list = sorted(files.values(), key=lambda f: f["path"])
+    yield ("progress", {"step": "paths", "label": f"{len(files_list)} distinct file(s) affected", "done": True})
+
     preview = [
         {"blob": sha[:12], "line": line_no, "text": line[:200].decode("utf-8", errors="replace")}
         for sha, line, line_no in line_findings[:20]
@@ -1132,6 +1387,7 @@ def _run_recover_analyze(root: Path) -> Generator[tuple[str, dict], None, None]:
         {
             "findings_count": len(line_findings),
             "blobs_affected": len(blobs_affected),
+            "files": files_list,
             "preview": preview,
             "truncated": len(line_findings) > 20,
             "clock_tamper_blobs_count": len(clock_tamper_blobs),
@@ -1173,11 +1429,21 @@ def recover_analyze_stream(req: RecoveryAnalyzeRequest) -> StreamingResponse:
     )
 
 
-def _run_recovery(root: Path, push: bool, token: str | None) -> Generator[tuple[str, dict], None, None]:
+def _run_recovery(
+    root: Path, push: bool, token: str | None, excluded_paths: list[str] | None = None
+) -> Generator[tuple[str, dict], None, None]:
     """Mirror-clone `root` into a disposable tmpdir, rewrite history there,
     optionally force-push the result back to `root`'s own 'origin' remote,
     then always delete the disposable clone. Never modifies `root` itself --
     that's the whole point of working on a throwaway mirror.
+
+    excluded_paths, if given, are file paths the user unchecked in the
+    analyze preview's per-file list -- any blob ever committed at one of
+    those paths is left completely untouched by the rewrite ("checked files
+    only"), even if it matched an IOC/padding/masquerade/vscode-task
+    signal. Lets a human veto a specific false positive (e.g. a markdown
+    table row that happens to trip the whitespace-padding heuristic)
+    without giving up the rest of the cleanup.
     """
     tmpdir = Path(tempfile.mkdtemp(prefix="polinrider-guard-recover-"))
     try:
@@ -1237,6 +1503,26 @@ def _run_recovery(root: Path, push: bool, token: str | None) -> Generator[tuple[
             },
         )
 
+        excluded_blob_shas: set[str] | None = None
+        excluded_set = set(excluded_paths or [])
+        if excluded_set:
+            yield ("progress", {"step": "scope", "label": "Applying file selection..."})
+            path_map = recovery.blob_paths(tmpdir)
+            # Deliberately the small excluded set, not "every other blob in
+            # the repo" -- that full-repo set gets embedded as literal
+            # source in the generated git-filter-repo callback (see
+            # build_callback_source()) and passed as one CLI argument, so
+            # its size needs to track what got unchecked, not repo size.
+            excluded_blob_shas = {sha for sha, paths in path_map.items() if paths & excluded_set}
+            yield (
+                "progress",
+                {
+                    "step": "scope",
+                    "label": f"{len(excluded_set)} file(s) excluded from the rewrite",
+                    "done": True,
+                },
+            )
+
         yield ("progress", {"step": "rewrite", "label": "Rewriting history via git-filter-repo..."})
         masquerade_shas = [sha for sha, _ in masquerade_blobs]
         vscode_task_shas = [sha for sha, _ in vscode_task_blobs]
@@ -1246,6 +1532,7 @@ def _run_recovery(root: Path, push: bool, token: str | None) -> Generator[tuple[
                 patterns,
                 masquerade_shas=masquerade_shas,
                 vscode_task_shas=vscode_task_shas,
+                excluded_blob_shas=excluded_blob_shas,
                 force_non_mirror=False,
             )
         except RuntimeError as exc:
@@ -1257,6 +1544,13 @@ def _run_recovery(root: Path, push: bool, token: str | None) -> Generator[tuple[
         remaining, remaining_clock_blobs = recovery.analyze_blobs(tmpdir, patterns)
         remaining_masquerade_blobs = recovery.find_masquerade_blobs(tmpdir)
         remaining_vscode_task_blobs = recovery.find_risky_vscode_task_blobs(tmpdir)
+        if excluded_blob_shas:
+            # Deliberately-excluded blobs are expected to still match --
+            # only flag findings among blobs that were actually in scope.
+            remaining = [f for f in remaining if f[0] not in excluded_blob_shas]
+            remaining_clock_blobs = [f for f in remaining_clock_blobs if f[0] not in excluded_blob_shas]
+            remaining_masquerade_blobs = [f for f in remaining_masquerade_blobs if f[0] not in excluded_blob_shas]
+            remaining_vscode_task_blobs = [f for f in remaining_vscode_task_blobs if f[0] not in excluded_blob_shas]
         if remaining or remaining_clock_blobs or remaining_masquerade_blobs or remaining_vscode_task_blobs:
             yield (
                 "error",
@@ -1322,7 +1616,7 @@ def recover_apply(req: RecoveryApplyRequest) -> JSONResponse:
 
     result = None
     error_message = None
-    for event, data in _run_recovery(root, req.push, req.token):
+    for event, data in _run_recovery(root, req.push, req.token, req.excluded_paths):
         if event == "done":
             result = data
         elif event == "error":
@@ -1338,7 +1632,7 @@ def recover_apply_stream(req: RecoveryApplyRequest) -> StreamingResponse:
     root = _validate_recover_apply_request(req)
 
     def generate():
-        for event, data in _run_recovery(root, req.push, req.token):
+        for event, data in _run_recovery(root, req.push, req.token, req.excluded_paths):
             yield _sse(event, data)
 
     return StreamingResponse(

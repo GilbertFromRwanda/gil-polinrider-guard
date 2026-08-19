@@ -233,12 +233,13 @@ def find_clock_tamper_blobs(repo: Path) -> list[tuple[str, list[str]]]:
     return clock_findings
 
 
-def _iter_masquerade_candidate_paths(repo: Path) -> Iterator[tuple[str, str]]:
-    """Yield (blob_sha, path) for every blob ever committed at a path whose
-    extension claims a binary format scan_masquerade.py checks. A blob has
-    no extension of its own -- only the tree entry (path) pointing to it
-    does -- so, unlike _iter_blobs(), this needs `git rev-list --objects`'s
-    per-object path column, not just the bare object list.
+def _iter_object_paths(repo: Path) -> Iterator[tuple[str, str]]:
+    """Yield (blob_sha, path) for every blob at every path it has ever been
+    committed at, across all of history. A blob has no path of its own --
+    only the tree entry pointing to it does -- so, unlike _iter_blobs(),
+    this needs `git rev-list --objects`'s per-object path column, not just
+    the bare object list. A single blob sha can yield more than once here
+    (same content committed at several paths, or moved over time).
     """
     rev_list = _run(["git", "-C", str(repo), "rev-list", "--objects", "--all"])
     if rev_list.returncode != 0:
@@ -246,11 +247,34 @@ def _iter_masquerade_candidate_paths(repo: Path) -> Iterator[tuple[str, str]]:
 
     for line in rev_list.stdout.splitlines():
         parts = line.split(" ", 1)
-        if len(parts) != 2:
-            continue  # commits/trees/root objects rev-list lists with no path
-        sha, path = parts
+        if len(parts) != 2 or not parts[1]:
+            # Commits get no path column at all; each commit's own root
+            # tree gets an empty one ("<sha> ", trailing space, no name) --
+            # neither is a blob-at-a-path, so both are skipped here.
+            continue
+        yield parts[0], parts[1]
+
+
+def _iter_masquerade_candidate_paths(repo: Path) -> Iterator[tuple[str, str]]:
+    """Yield (blob_sha, path) for every blob ever committed at a path whose
+    extension claims a binary format scan_masquerade.py checks.
+    """
+    for sha, path in _iter_object_paths(repo):
         if Path(path).suffix.lower() in scan_masquerade.BINARY_LIKE_EXTENSIONS:
             yield sha, path
+
+
+def blob_paths(repo: Path) -> dict[str, set[str]]:
+    """Map every blob sha that has ever existed in history to the set of
+    paths it has ever been committed at. Lets a caller scope a rewrite down
+    to specific files (recovery's "checked files only" mode in the web UI)
+    without re-deriving IOC/padding matches from blob content alone, which
+    has no path information (see _iter_blobs()).
+    """
+    mapping: dict[str, set[str]] = {}
+    for sha, path in _iter_object_paths(repo):
+        mapping.setdefault(sha, set()).add(path)
+    return mapping
 
 
 def find_masquerade_blobs(repo: Path) -> list[tuple[str, str]]:
@@ -441,6 +465,7 @@ def build_callback_source(
     patterns: list[re.Pattern],
     masquerade_shas: list[str] | None = None,
     vscode_task_shas: list[str] | None = None,
+    excluded_blob_shas: set[str] | None = None,
 ) -> str:
     """Build the body git-filter-repo will splice into its own generated
     `def callback(blob, _do_not_use_this_var=None): <body>` function.
@@ -455,26 +480,52 @@ def build_callback_source(
     find_clock_tamper_blobs() vs analyze(): a blob whose *original*
     (pre-rewrite) sha is a confirmed masquerade or risky-tasks.json match,
     or one that's a whole clock-tamper script, gets blanked entirely; any
-    other blob just has its matching lines (IOC patterns + the
-    whitespace-padding signal) stripped, leaving the rest byte-for-byte
-    identical. Masquerade and vscode-task blobs are matched by sha rather
-    than by re-deriving the check from `blob.data` alone because both checks
-    need the blob's *path* too (its claimed extension, or "is this actually
-    a .vscode/tasks.json"), and a --blob-callback only ever sees blob
-    content, never the path -- so those sha sets are precomputed by
+    other blob has its matching IOC lines dropped entirely (those patterns
+    match self-contained malicious statements, e.g. `global['_V']='8-...'`,
+    so the whole line is the payload) and its whitespace-padding lines
+    *truncated* rather than dropped: unlike an IOC line, the whole point of
+    the padding technique is real code followed by 80+ hidden spaces then a
+    payload (e.g. `export default createJestConfig(config);<...>evil()`),
+    so dropping the line would delete legitimate code along with the
+    payload. Truncating at the start of the padding run keeps the
+    legitimate prefix and discards only the hidden suffix. Masquerade and
+    vscode-task blobs are matched by sha rather than by re-deriving the
+    check from `blob.data` alone because both checks need the blob's *path*
+    too (its claimed extension, or "is this actually a .vscode/tasks.json"),
+    and a --blob-callback only ever sees blob content, never the path -- so
+    those sha sets are precomputed by
     find_masquerade_blobs()/find_risky_vscode_task_blobs() up front and
     passed in here. They're combined into one blank-on-sha-match set since
     both get identical treatment (the whole blob is the payload either way).
+
+    excluded_blob_shas, if given, is the set of blobs to leave completely
+    untouched ("checked files only" in the web UI, applied to whichever
+    files the user *unchecked*), even if they'd otherwise match an
+    IOC/padding/masquerade/vscode-task signal. None or empty (the default)
+    means no exclusions -- every matching blob in history is touched, the
+    original behavior. Deliberately the *excluded* set, not an included
+    one: a user typically unchecks a handful of false positives out of a
+    repo that can have thousands of blobs, and this whole set gets embedded
+    as literal source in the generated callback (see below) and passed as
+    a single git-filter-repo CLI argument -- sized to "what got unchecked"
+    instead of "every blob in the repo minus what got unchecked" is the
+    difference between that argument staying small and it blowing past the
+    OS's command-line length limit on any real-sized repo. Blob content
+    alone carries no path, so the caller derives this set from
+    blob_paths() plus whichever paths the user left unchecked.
     """
-    line_pattern_literals = ",\n".join(repr(p.pattern) for p in _line_patterns(patterns))
+    ioc_pattern_literals = ",\n".join(repr(p.pattern) for p in patterns)
+    whitespace_pattern_literal = repr(WHITESPACE_RUN_RE_BYTES.pattern)
     clock_pattern_literals = ",\n".join(repr(p.pattern) for p, _desc in CLOCK_SET_PATTERNS)
     amend_pattern_literal = repr(AMEND_RE.pattern)
     blank_shas = {*(masquerade_shas or []), *(vscode_task_shas or [])}
     blank_sha_literals = ",\n".join(repr(sha.encode()) for sha in blank_shas)
+    excluded_sha_literals = ",\n".join(repr(sha.encode()) for sha in (excluded_blob_shas or []))
     return f"""import re
-_line_patterns = [re.compile(p) for p in [
-{line_pattern_literals}
+_ioc_patterns = [re.compile(p) for p in [
+{ioc_pattern_literals}
 ]]
+_whitespace_pattern = re.compile({whitespace_pattern_literal})
 _clock_patterns = [re.compile(p) for p in [
 {clock_pattern_literals}
 ]]
@@ -482,16 +533,38 @@ _amend_pattern = re.compile({amend_pattern_literal})
 _blank_shas = frozenset([
 {blank_sha_literals}
 ])
+_excluded_shas = frozenset([
+{excluded_sha_literals}
+])
 
 data = blob.data
-if blob.original_id in _blank_shas:
+if blob.original_id in _excluded_shas:
+    pass
+elif blob.original_id in _blank_shas:
     blob.data = b''
 elif data and any(p.search(data) for p in _clock_patterns) and _amend_pattern.search(data):
     blob.data = b''
 else:
     lines = data.split(b'\\n')
-    kept = [ln for ln in lines if not any(p.search(ln) for p in _line_patterns)]
-    if len(kept) != len(lines):
+    kept = []
+    changed = False
+    for ln in lines:
+        m = _whitespace_pattern.search(ln)
+        if m:
+            # Truncate first: the hidden suffix after the padding is where
+            # a real payload lives, and it commonly *also* matches an IOC
+            # pattern (e.g. eval(Buffer.from(...))) -- checking IOC
+            # patterns against the untruncated line would then drop the
+            # whole line, legitimate prefix included. Truncating first
+            # removes the hidden suffix outright, so the IOC check below
+            # only ever sees the already-clean prefix.
+            ln = ln[:m.start() + 1]
+            changed = True
+        if any(p.search(ln) for p in _ioc_patterns):
+            changed = True
+            continue
+        kept.append(ln)
+    if changed:
         blob.data = b'\\n'.join(kept)
 """
 
@@ -511,6 +584,7 @@ def apply_clean(
     patterns: list[re.Pattern],
     masquerade_shas: list[str] | None = None,
     vscode_task_shas: list[str] | None = None,
+    excluded_blob_shas: set[str] | None = None,
     force_non_mirror: bool = False,
 ) -> None:
     if not force_non_mirror and not is_bare_or_mirror(repo):
@@ -523,7 +597,7 @@ def apply_clean(
         )
 
     script_path = find_filter_repo_script()
-    callback_src = build_callback_source(patterns, masquerade_shas, vscode_task_shas)
+    callback_src = build_callback_source(patterns, masquerade_shas, vscode_task_shas, excluded_blob_shas)
 
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
         f.write(callback_src)
