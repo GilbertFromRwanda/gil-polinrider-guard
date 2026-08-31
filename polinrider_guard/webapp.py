@@ -1667,16 +1667,13 @@ def recover_remove_vscode_tasks(req: RecoveryRemoveTasksRequest) -> JSONResponse
 MAX_FILE_VIEW_BYTES = 1_000_000  # 1MB cap -- a sane bound for "show me the file", not a file dump service
 
 
-@app.get("/api/file")
-def view_file(path: str, file: str) -> JSONResponse:
-    """Read a single file's content for the browser's file viewer.
+def _resolve_scanned_file(path: str, file: str) -> tuple[Path, Path]:
+    """Validate that `file` (relative) resolves to inside repo root `path`.
 
-    `path` is a repo root already scanned (or being recovered); `file` is a
-    path relative to it. Resolved and checked to land *inside* `path`, so
-    this can't be used to read arbitrary files elsewhere on the host via a
-    `../` (or an absolute-path) escape -- same trust boundary as local-path
-    scanning itself, not a new one: it's read-only, and never leaves the
-    loopback interface by default.
+    Shared by /api/file and /api/blame -- same trust boundary as local-path
+    scanning itself, not a new one: this can't be used to reach outside
+    `path` via a `../` (or an absolute-path) escape. Returns (root, target),
+    both resolved.
     """
     root = Path(path)
     if not root.exists() or not root.is_dir():
@@ -1694,6 +1691,19 @@ def view_file(path: str, file: str) -> JSONResponse:
     if not target.exists() or not target.is_file():
         raise HTTPException(404, f"file not found: {file}")
 
+    return root, target
+
+
+@app.get("/api/file")
+def view_file(path: str, file: str) -> JSONResponse:
+    """Read a single file's content for the browser's file viewer.
+
+    `path` is a repo root already scanned (or being recovered); `file` is a
+    path relative to it. Read-only, and never leaves the loopback interface
+    by default.
+    """
+    root, target = _resolve_scanned_file(path, file)
+
     raw = target.read_bytes()
     if b"\x00" in raw[:8192]:
         return JSONResponse({"content": "", "binary": True, "truncated": False, "size": len(raw)})
@@ -1701,6 +1711,65 @@ def view_file(path: str, file: str) -> JSONResponse:
     truncated = len(raw) > MAX_FILE_VIEW_BYTES
     content = raw[:MAX_FILE_VIEW_BYTES].decode("utf-8", errors="replace")
     return JSONResponse({"content": content, "binary": False, "truncated": truncated, "size": len(raw)})
+
+
+def _parse_blame_porcelain(output: str) -> dict:
+    lines = output.splitlines()
+    if not lines:
+        raise HTTPException(404, "no blame data for this line")
+
+    commit = lines[0].split()[0]
+    info: dict = {"commit": commit}
+    for entry in lines[1:]:
+        if entry.startswith("author "):
+            info["author"] = entry[len("author "):]
+        elif entry.startswith("author-mail "):
+            info["email"] = entry[len("author-mail "):].strip("<>")
+        elif entry.startswith("author-time "):
+            info["timestamp"] = int(entry.split()[1])
+        elif entry.startswith("summary "):
+            info["summary"] = entry[len("summary "):]
+        elif entry.startswith("\t"):
+            break
+
+    if commit == "0" * 40:
+        info["uncommitted"] = True
+    return info
+
+
+@app.get("/api/blame")
+def blame_file(path: str, file: str, line: int | None = None) -> JSONResponse:
+    """Identify who committed the flagged line -- or, when the scanner
+    finding has no line number, who first added the file -- via `git
+    blame`/`git log`. Read-only, same path trust boundary as /api/file.
+    """
+    root, target = _resolve_scanned_file(path, file)
+    if not (root / ".git").exists():
+        raise HTTPException(400, "not a git repository")
+
+    rel = target.relative_to(root).as_posix()
+
+    if line and line > 0:
+        cmd = ["git", "-C", str(root), "blame", "-L", f"{line},{line}", "--porcelain", "--", rel]
+    else:
+        cmd = [
+            "git", "-C", str(root), "log", "--follow", "--diff-filter=A",
+            "--format=%H%x1f%an%x1f%ae%x1f%at%x1f%s", "--", rel,
+        ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        raise HTTPException(400, f"git command failed: {result.stderr.strip()}")
+
+    if line and line > 0:
+        return JSONResponse(_parse_blame_porcelain(result.stdout))
+
+    entries = result.stdout.strip("\n").splitlines()
+    if not entries:
+        raise HTTPException(404, "no commit history found for this file")
+    # git log lists newest-first; the file's *addition* is the oldest entry.
+    commit, author, email, ts, subject = entries[-1].split("\x1f")
+    return JSONResponse({"commit": commit, "author": author, "email": email, "timestamp": int(ts), "summary": subject})
 
 
 class OpenFolderRequest(BaseModel):

@@ -900,6 +900,15 @@ function renderReport(report) {
         });
         openBtn.addEventListener("click", () => openInFileExplorer(report.source_path, f.file, openBtn));
         row.appendChild(openBtn);
+
+        const blameBtn = el("button", {
+          type: "button",
+          class: "view-file-btn",
+          text: "Who added this?",
+          title: "Show the commit/author that introduced this line (git blame)",
+        });
+        blameBtn.addEventListener("click", () => showBlame(report.source_path, f.file, f.line, blameBtn));
+        row.appendChild(blameBtn);
       }
       box.appendChild(row);
     });
@@ -2425,6 +2434,46 @@ async function deleteReportClone(report, btn, onDeleted) {
     btn.textContent = "Delete clone";
     btn.title = String(err.message || err);
   }
+}
+
+// Runs `git blame` (or, when the finding has no line number, `git log`) on
+// the flagged file server-side (see /api/blame) to identify which commit
+// and author introduced it, and drops the answer inline in the finding row
+// -- so triaging a finding doesn't require dropping to a terminal.
+async function showBlame(repoPath, filePath, line, btn) {
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    const qs = new URLSearchParams({ path: repoPath, file: filePath });
+    if (line) qs.set("line", line);
+    const resp = await fetch(`/api/blame?${qs.toString()}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+
+    const existing = btn.parentElement.querySelector(".blame-result");
+    if (existing) existing.remove();
+
+    let text;
+    if (data.uncommitted) {
+      text = "Not committed yet -- this is an uncommitted local change.";
+    } else {
+      const when = data.timestamp ? new Date(data.timestamp * 1000).toLocaleString() : "unknown date";
+      text = `${data.author} <${data.email}> on ${when} -- ${data.commit.slice(0, 12)} "${data.summary}"`;
+    }
+    btn.parentElement.appendChild(el("span", { class: "ctx blame-result", text }));
+  } catch (err) {
+    btn.textContent = "Failed";
+    btn.title = String(err.message || err);
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.title = "";
+    }, 2500);
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  btn.textContent = originalText;
 }
 
 async function openFileViewer(repoPath, filePath, line) {
