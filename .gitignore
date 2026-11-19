@@ -8,3 +8,4 @@ build/
 dist/
 callback_dump.py
 .env
+.polinrider-run-stamp-*
