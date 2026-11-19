@@ -157,10 +157,44 @@ def evaluate_tasks_json(text: str) -> list[VscodeFinding]:
     no filesystem Path to read -- instead of only working with a file on
     disk the way scan_tasks_file() below does.
     """
+    # A byte-order mark is the cheapest possible evasion: VS Code reads a
+    # BOM-prefixed tasks.json perfectly happily and still auto-runs the
+    # task, but json.loads() rejects the BOM as a stray character, so the
+    # file parsed as nothing and the whole file came back clean. Three
+    # bytes turned a critical finding into "no findings". Windows editors
+    # also emit a BOM by accident, so this is both an attack and a
+    # false-negative source. Stripped before anything else looks at it.
+    text = text.lstrip("\ufeff")
+
+    # An empty (or whitespace-only) tasks file defines no tasks and runs
+    # nothing, so it is clean, not unparseable. This matters beyond tidiness:
+    # recovery.py blanks a risky historical blob to empty, and the
+    # parse-failure finding below would otherwise flag recovery's own
+    # cleaned output as still risky.
+    if not text.strip():
+        return []
+
     try:
         data = json.loads(strip_jsonc_comments(text))
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        # Never report an unparseable tasks file as clean. VS Code's own
+        # parser is far more forgiving than json.loads, so "we could not
+        # read it" says nothing about whether it auto-runs something --
+        # exactly the gap the BOM case above walked through. Surface it and
+        # let a human look, rather than silently returning no findings.
+        return [
+            VscodeFinding(
+                file="",
+                task_label="(file could not be parsed)",
+                reasons=[
+                    f"tasks file is not valid JSON/JSONC and was NOT checked ({exc.msg} "
+                    f"at line {exc.lineno} column {exc.colno}); VS Code may still run it, "
+                    "so inspect it by hand"
+                ],
+                command="",
+                severity="medium",
+            )
+        ]
 
     tasks = data.get("tasks", []) if isinstance(data, dict) else []
     findings: list[VscodeFinding] = []

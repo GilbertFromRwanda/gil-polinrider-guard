@@ -9,6 +9,8 @@
 # Usage:
 #   ./run.sh                          # web UI on http://127.0.0.1:8765
 #   ./run.sh web --port 9000          # web UI, extra flags passed through
+#   ./run.sh web 9000                 # same thing; a bare number means --port
+#   ./run.sh 9000                     # same thing
 #   ./run.sh scan /path/to/repo       # CLI scan (flags passed through)
 #   ./run.sh scan /path/to/repo --json
 #   ./run.sh demo                     # scan the bundled example fixtures
@@ -45,6 +47,8 @@ pyproject.toml changed or you pass --reinstall.
 Usage:
   ./run.sh                          # web UI on http://127.0.0.1:8765
   ./run.sh web --port 9000          # web UI, extra flags passed through
+  ./run.sh web 9000                 # same thing; a bare number means --port
+  ./run.sh 9000                     # same thing
   ./run.sh scan /path/to/repo       # CLI scan (flags passed through)
   ./run.sh scan /path/to/repo --json
   ./run.sh demo                     # scan the bundled example fixtures
@@ -74,6 +78,14 @@ done
 
 COMMAND="${1:-web}"
 [ $# -gt 0 ] && shift || true
+
+# A bare number is what people actually type for a port -- `./run.sh web 900`
+# or just `./run.sh 9000`. The server below only accepts `--port N`, so
+# translate it here instead of letting argparse reject it.
+if [ "$COMMAND" != "scan" ] && printf '%s' "$COMMAND" | grep -Eq '^[0-9]+$'; then
+    set -- "$COMMAND" "$@"
+    COMMAND=web
+fi
 
 # ------------------------------------------------------------------ setup --
 # Newest first: the web UI's pydantic models use `str | None`, which only
@@ -205,6 +217,11 @@ case "$COMMAND" in
         setup_python
         install_if_needed "$(extras_for web)"
 
+        if [ $# -gt 0 ] && printf '%s' "$1" | grep -Eq '^[0-9]+$'; then
+            bare_port="$1"; shift
+            set -- --port "$bare_port" "$@"
+        fi
+
         # Mirror webapp.py's own defaults so --open points at the right place.
         host="127.0.0.1"; port="8765"
         prev=""
@@ -223,6 +240,13 @@ case "$COMMAND" in
             0.0.0.0|::) browse_host="localhost" ;;
             *) browse_host="$host" ;;
         esac
+
+        # Binding below 1024 needs root, and the failure surfaces as a bare
+        # "permission denied" traceback from uvicorn well after this script
+        # has handed off -- easier to say so up front.
+        if [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -lt 1024 ] 2>/dev/null; then
+            say "note: port $port is privileged -- binding it needs root. Use 1024 or above (e.g. 9000), or prefix with sudo."
+        fi
 
         if [ "$OPEN_BROWSER" -eq 1 ]; then
             ( sleep 2; open_url "http://$browse_host:$port" ) &
