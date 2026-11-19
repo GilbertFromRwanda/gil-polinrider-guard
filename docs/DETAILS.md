@@ -48,6 +48,27 @@ Each one also works standalone with `--json` for scripting, and each is a
 plain Python module under `polinrider_guard/` if you want to call it as a
 library instead of a CLI.
 
+### Which files the padding scanner reads
+
+The whitespace-padding technique is a JS-ecosystem one, so a directory scan
+measures line lengths in `.js`, `.mjs` and `.ts` files. Scanning every text
+file instead would aim the length heuristics at vendored CSS/SVG assets
+whose huge lines are ordinary, which is unfixable noise: minified vendor
+code and an appended-with-no-gap payload are structurally identical.
+
+**Extensionless files are the exception, and are sniffed rather than
+skipped.** `node init` happily executes a file named plain `init`, so
+trusting the suffix would make a file with no extension the one blind spot
+in a tool whose premise is that the extension is a trust model, not a
+security model. A file with no extension is read if it declares itself JS
+(a `node`/`bun`/`deno` shebang, or a CommonJS/ESM construct such as
+`require(` or `module.exports` near the top) — which also covers the
+extensionless spelling of the eslint config the live sample used. Failing
+that, it is still reported if the high-confidence signal itself is present,
+since 80+ spaces walled between two non-space characters has no ordinary
+formatting purpose in any format. Binary files are skipped: there is no
+text line for a run of spaces to hide in.
+
 ## Suppressing a false positive (allowlist)
 
 A finding you've reviewed and confirmed is legitimate — a vendored font that

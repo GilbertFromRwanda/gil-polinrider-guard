@@ -221,6 +221,69 @@ def test_padding_scanner_only_scans_js_family_files(tmp_path):
     assert scan_padding.scan_path(tmp_path) == []
 
 
+def test_padding_scanner_finds_payload_in_extensionless_file(tmp_path):
+    # The real-world miss this closes: an extensionless file named `init`,
+    # which `node init` resolves and runs perfectly well, carrying the
+    # ordinary padded-payload shape. Scanning the file by path always
+    # flagged it; the directory walk skipped it on its suffix alone, so a
+    # whole-repo scan reported the tree clean.
+    (tmp_path / "init").write_text(
+        "'use strict';\n"
+        "const path = require('path');\n"
+        "module.exports = { init };" + " " * 776 + 'global.i="A8-3955";\n'
+    )
+    findings = scan_padding.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].file == "init"
+    assert findings[0].kind == "excessive_whitespace_padding"
+    assert findings[0].severity == "high"
+
+
+def test_padding_scanner_finds_extensionless_node_shebang_script(tmp_path):
+    # A `bin/` entry point with no extension: the shebang is the only
+    # declaration that it's JS at all.
+    (tmp_path / "serve").write_text(
+        "#!/usr/bin/env node\n"
+        "console.log('up');" + " " * 200 + 'global.r=require;\n'
+    )
+    findings = scan_padding.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].file == "serve"
+
+
+def test_padding_scanner_skips_extensionless_non_js_text(tmp_path):
+    # The other half of the sniff: an extensionless file has to actually
+    # look like JS-family source before its lines are measured, or every
+    # LICENSE/CHANGELOG/Makefile-shaped file in a repo starts reaching the
+    # length heuristics those thresholds were never tuned for. Long prose
+    # line, no JS construct, no padding run -> never scanned.
+    (tmp_path / "LICENSE").write_text(
+        "MIT License\n\nCopyright (c) 2026\n\n"
+        + "Permission is hereby granted free of charge to any person obtaining a copy. " * 40
+        + "\nEND\n"
+    )
+    assert scan_padding.scan_path(tmp_path) == []
+
+
+def test_padding_scanner_flags_padding_in_extensionless_file_without_js_markers(tmp_path):
+    # Language-blind last resort: no shebang and no CommonJS/ESM construct
+    # to go on, but this scanner's own primary signal -- 80+ spaces walled
+    # between two non-space characters -- is right there. That shape has no
+    # ordinary formatting purpose in any format, so it's reported rather
+    # than filtered out on a failed language guess.
+    (tmp_path / "payload").write_text("var x = 1;" + " " * 300 + 'fetch("http://c2");\n')
+    findings = scan_padding.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].kind == "excessive_whitespace_padding"
+
+
+def test_padding_scanner_skips_extensionless_binary(tmp_path):
+    # Binary blobs have no text line for a whitespace run to hide in, and
+    # decoding them would be pure noise.
+    (tmp_path / "blob").write_bytes(b"\x00\x01\x02" + b" " * 300 + b"\xff\xfe")
+    assert scan_padding.scan_path(tmp_path) == []
+
+
 def test_padding_scanner_finds_whitespace_padded_payload_on_last_line(tmp_path):
     # Same signal as test_padding_scanner_finds_whitespace_padded_payload,
     # but the padded line is the file's last line with no trailing newline

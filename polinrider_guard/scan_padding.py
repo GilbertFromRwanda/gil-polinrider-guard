@@ -126,17 +126,80 @@ class PaddingFinding:
 # structurally identical.
 _SCAN_EXTENSIONS = {".js", ".mjs", ".ts"}
 
+# An *extensionless* file is the hole in that filter, and exactly the one a
+# payload can hide in: `node init` resolves and executes a file named plain
+# `init` with no ".js" anywhere in its name, so a walk that trusts suffixes
+# never opens it -- even though handing that same file to this scanner by
+# path flags it immediately. "File extension is a trust model, not a
+# security model" is this project's whole premise, so a file that declines
+# to declare one gets sniffed rather than skipped.
+#
+# Dotfiles are included by construction (Path(".eslintrc").suffix == ""),
+# which also covers the extensionless spelling of the eslint config the
+# confirmed sample used -- see the module docstring.
+_JS_SNIFF_BYTES = 8192
+_NODE_SHEBANG_RE = re.compile(rb"^#![^\n]*\b(?:node|bun|deno)\b")
+# Structural JS, not merely "has curly braces": every one of these is a
+# CommonJS/ESM construct that does not occur in shell, Python, Make, or a
+# license file. Keeping the bar here is what stops the sniff from dragging
+# LICENSE/Makefile/README-shaped files into a scanner whose thresholds were
+# tuned on JS-family source -- the same noise argument as the extension
+# allowlist above, applied one level deeper.
+_JS_MARKERS_RE = re.compile(
+    rb"module\.exports"
+    rb"|require\s*\("
+    rb"|export\s+(?:default|const|let|var|function|class)\b"
+    rb"|import\s+[\w{*][^;\n]*\bfrom\s*['\"]"
+)
+
+
+def _looks_like_js_source(path: Path) -> bool:
+    """Whether an extensionless file is JS-family source worth scanning.
+
+    Reads only the first _JS_SNIFF_BYTES: a hidden payload is appended
+    *after* legitimate-looking code, so the markers that identify the
+    language sit at the top of the file, well inside the head, while the
+    padding sits at the end.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(_JS_SNIFF_BYTES)
+    except OSError:
+        return False
+    if b"\x00" in head:
+        return False  # binary: no text line for a whitespace run to hide in
+    if _NODE_SHEBANG_RE.match(head):
+        return True
+    if _JS_MARKERS_RE.search(head):
+        return True
+    # Last resort, and deliberately language-blind: if this scanner's own
+    # primary, high-confidence signal is already visible in the head, the
+    # file is worth reporting whatever language it turns out to be. An
+    # 80+ character run of spaces sandwiched between two non-space
+    # characters has no ordinary formatting purpose in any format.
+    return bool(WHITESPACE_RUN_RE.search(head.decode("utf-8", errors="replace")))
+
+
+def _is_candidate(path: Path) -> bool:
+    if path.name.lower().endswith(SKIP_FILENAME_SUFFIXES):
+        return False
+    suffix = path.suffix.lower()
+    if suffix in _SCAN_EXTENSIONS:
+        return True
+    if suffix == "":
+        return _looks_like_js_source(path)
+    return False
+
 
 def _iter_candidate_files(root: Path):
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
         for name in filenames:
             path = Path(dirpath) / name
-            if path.suffix.lower() not in _SCAN_EXTENSIONS:
+            if path.is_symlink() or not path.is_file():
                 continue
-            if name.lower().endswith(SKIP_FILENAME_SUFFIXES):
-                continue
-            yield path
+            if _is_candidate(path):
+                yield path
 
 
 def _whitespace_run_context(line: str, match: re.Match, before: int = 30, after: int = 60) -> str:
