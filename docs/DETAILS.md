@@ -275,7 +275,7 @@ URL for that account (a bare root, `github.com/orgs/some-org/repositories`
 as GitHub's own UI links an org's repo list, with or without `https://`,
 `git@github.com:some-org`) and it scans every repo in that account instead
 of a single clone. GitHub-only for now. Under the hood it lists the
-account's repos via GitHub's API (trying the org endpoint first, then the
+account's repos via GitHub's API (trying the org endpoint first, then a
 user endpoint, since a bare login can't tell those apart up front), then
 clones and scans each repo in turn, showing live clone progress per repo.
 Unlike a single URL scan, there's no single "most recent clone" slot to
@@ -289,6 +289,42 @@ field is used both for the GitHub API listing call and for cloning, so it's
 worth providing even for a public account — unauthenticated GitHub API
 calls are rate-limited far more aggressively — and it's required to see a
 private org/account's repos at all.
+
+#### Private repos
+
+A token alone isn't enough; the endpoint has to match the target, which is
+what the listing code picks for you:
+
+| Target | Endpoint used | Private repos included? |
+|---|---|---|
+| An org | `/orgs/{org}/repos` (`type=all`) | Yes, whatever the token can read |
+| **Your own** user account | `/user/repos` (`visibility=all&affiliation=owner`) | Yes, every repo you own |
+| Someone else's user account | `/users/{user}/repos` | No — GitHub only ever serves their public repos |
+
+That middle row is the one that used to surprise people:
+`/users/{user}/repos` is documented as *public repositories for the
+specified user* and ignores your token's visibility, so scanning your own
+login returned a public-only list even with a valid token. Scanning your
+own account now goes through `/user/repos` instead. It's matched on the
+login the token belongs to, so you have to type your own login (or a URL
+for it) for that to kick in. `affiliation=owner` keeps it to repos you own —
+a repo you only collaborate on lives under someone else's login, so it
+isn't a repo "under your account"; scan it by its URL in **Git URL** mode
+with the same token.
+
+There is no way to enumerate *another* user's private repos — only their
+own token can do that. If a scan of a login you expected to be private
+comes back with public repos only, that's the reason.
+
+Token permissions for the private case:
+
+- **Classic PAT** — the `repo` scope.
+- **Fine-grained PAT** — *Contents: Read-only* on the repos you want
+  scanned, plus *Metadata: Read-only* (GitHub requires it alongside
+  Contents). For an org's repos the org has to approve the token.
+
+Cloning uses the same token, injected as HTTP basic auth, and is stripped
+out of any error text before it reaches the browser.
 
 Either this or the local-folder batch scan above can leave one or two repos
 failed (a clone timeout, a transient network error) without the whole run

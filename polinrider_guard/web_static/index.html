@@ -570,7 +570,7 @@
     <div id="org-fields" class="fields hidden">
       <input name="org" type="text" placeholder="some-org, or a GitHub URL (e.g. https://github.com/some-org)">
       <input name="org-token" type="password" autocomplete="off" placeholder="access token (optional, for private repos / rate limit)">
-      <div class="hint">Scans every repo in that GitHub org or user account. GitHub-only. A token is recommended even for a public account — unauthenticated API calls hit a much lower rate limit — and required to see a private account's repos.</div>
+      <div class="hint">Scans every repo in that GitHub org or user account. GitHub-only. A token is recommended even for a public account — unauthenticated API calls hit a much lower rate limit — and required to see private repos: with one, an org scan covers every private repo the token can read, and scanning <em>your own</em> login covers every private repo you own. Another user's private repos can't be listed by anyone but them.</div>
     </div>
 
     <div id="path-fields" class="fields hidden">

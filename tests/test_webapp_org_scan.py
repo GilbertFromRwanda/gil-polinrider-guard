@@ -125,6 +125,135 @@ def test_list_github_repos_propagates_non_404_errors(monkeypatch):
     assert "403" in str(exc_info.value) or "rate limited" in str(exc_info.value)
 
 
+def test_list_github_repos_uses_authenticated_endpoint_for_own_account(monkeypatch):
+    """/users/{login}/repos only ever serves public repos, so scanning the
+    account a token belongs to has to go through /user/repos instead."""
+    calls = []
+
+    def fake_get(path, token):
+        calls.append(path)
+        assert token == "tok"
+        if path == "/user":
+            return {"login": "Me"}
+        if path.startswith("/orgs/"):
+            raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+        if path.startswith("/user/repos"):
+            return [{"clone_url": "https://example.invalid/p.git", "full_name": "me/private", "private": True}]
+        raise AssertionError(f"should not fall back to the public endpoint: {path}")
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    repos = webapp._list_github_repos("me", "tok")
+
+    assert [r["full_name"] for r in repos] == ["me/private"]
+    listing = next(c for c in calls if c.startswith("/user/repos"))
+    assert "visibility=all" in listing
+    assert "affiliation=owner" in listing
+
+
+def test_list_github_repos_keeps_public_endpoint_for_another_users_account(monkeypatch):
+    """A token can't enumerate someone else's private repos, so a login that
+    isn't the token's own account still uses the public endpoint."""
+    calls = []
+
+    def fake_get(path, token):
+        calls.append(path)
+        if path == "/user":
+            return {"login": "me"}
+        if path.startswith("/orgs/"):
+            raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+        assert path.startswith("/users/someone-else/repos")
+        return [{"clone_url": "https://example.invalid/a.git", "full_name": "someone-else/a"}]
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    repos = webapp._list_github_repos("someone-else", "tok")
+
+    assert [r["full_name"] for r in repos] == ["someone-else/a"]
+    assert not any(c.startswith("/user/repos") for c in calls)
+
+
+def test_list_github_repos_org_listing_asks_for_all_types(monkeypatch):
+    """An org's private repos come back from /orgs/{org}/repos when the token
+    can read them -- assert we don't narrow it to public."""
+    calls = []
+
+    def fake_get(path, token):
+        calls.append(path)
+        if path == "/user":
+            return {"login": "me"}
+        return [{"clone_url": "https://example.invalid/a.git", "full_name": "some-org/a", "private": True}]
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    repos = webapp._list_github_repos("some-org", "tok")
+
+    assert [r["full_name"] for r in repos] == ["some-org/a"]
+    assert "type=all" in calls[-1]
+    assert "type=public" not in calls[-1]
+
+
+def test_list_github_repos_falls_back_to_public_when_own_listing_is_empty(monkeypatch):
+    """A fine-grained token scoped to an org only makes /user/repos empty; a
+    public-only list beats reporting the account as having no repos."""
+
+    def fake_get(path, token):
+        if path == "/user":
+            return {"login": "me"}
+        if path.startswith("/orgs/"):
+            raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+        if path.startswith("/user/repos"):
+            return []
+        return [{"clone_url": "https://example.invalid/a.git", "full_name": "me/a"}]
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    assert [r["full_name"] for r in webapp._list_github_repos("me", "tok")] == ["me/a"]
+
+
+def test_list_github_repos_empty_org_reports_zero_rather_than_404(monkeypatch):
+    def fake_get(path, token):
+        assert path.startswith("/orgs/")
+        return []
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    assert webapp._list_github_repos("empty-org", None) == []
+
+
+def test_github_token_login_returns_none_on_rejected_token(monkeypatch):
+    """A bad token must not crash discovery here -- the repos call that
+    follows raises the 401 that actually tells the user what's wrong."""
+
+    def fake_get(path, token):
+        raise urllib.error.HTTPError(path, 401, "Bad credentials", {}, None)
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    assert webapp._github_token_login("nope") is None
+
+
+def test_list_github_repos_without_token_never_calls_user_endpoint(monkeypatch):
+    calls = []
+
+    def fake_get(path, token):
+        calls.append(path)
+        if path.startswith("/orgs/"):
+            raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+        return [{"clone_url": "https://example.invalid/a.git", "full_name": "me/a"}]
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    webapp._list_github_repos("me", None)
+    assert "/user" not in calls
+    assert not any(c.startswith("/user/repos") for c in calls)
+
+
+def test_paginate_github_repos_walks_pages_and_caps(monkeypatch):
+    pages = {1: [{"n": i} for i in range(100)], 2: [{"n": 100}]}
+
+    def fake_get(path, token):
+        page = int(path.rsplit("page=", 1)[1])
+        return pages.get(page, [])
+
+    monkeypatch.setattr(webapp, "_github_api_get", fake_get)
+    repos = webapp._paginate_github_repos("/users/x/repos?per_page=100", None)
+    assert len(repos) == 101
+
+
 # --- /api/org-scan --------------------------------------------------------------
 
 

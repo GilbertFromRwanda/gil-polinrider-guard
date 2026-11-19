@@ -659,34 +659,89 @@ def _github_api_get(path: str, token: str | None) -> list | dict:
         return jsonlib.loads(resp.read())
 
 
+def _github_token_login(token: str) -> str | None:
+    """The login of the account a token belongs to, or None if the token is
+    rejected or the API can't be reached. Used only to decide whether an
+    account-scan target is the token's *own* account, which needs a
+    different repos endpoint -- see _list_github_repos.
+    """
+    try:
+        me = _github_api_get("/user", token)
+    except (urllib.error.HTTPError, urllib.error.URLError):
+        return None
+    return str(me.get("login")) if isinstance(me, dict) and me.get("login") else None
+
+
+def _paginate_github_repos(path: str, token: str | None) -> list[dict]:
+    """Collect repo objects from a paginated GitHub repos endpoint, 100/page,
+    stopping at MAX_BATCH_REPOS. `path` must already carry a query string
+    (every caller passes at least per_page), so pages append with `&`.
+    """
+    repos: list[dict] = []
+    page = 1
+    while len(repos) < MAX_BATCH_REPOS:
+        batch = _github_api_get(f"{path}&page={page}", token)
+        if not batch:
+            break
+        repos.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    return repos
+
+
 def _list_github_repos(login: str, token: str | None) -> list[dict]:
     """List every repo (as GitHub's API repo objects) under a GitHub org or
-    user account, trying the org endpoint first and falling back to the
-    user endpoint -- a bare account-root URL can't tell the two apart
-    without asking. Paginated at 100/page, capped at MAX_BATCH_REPOS total,
-    same bound and reasoning as the local batch-scan feature: a sane bound
-    on dashboard row count / SSE payload size / total clone time.
+    user account, trying the org endpoint first and falling back to a user
+    endpoint -- a bare account-root URL can't tell the two apart without
+    asking. Paginated at 100/page, capped at MAX_BATCH_REPOS total, same
+    bound and reasoning as the local batch-scan feature: a sane bound on
+    dashboard row count / SSE payload size / total clone time.
+
+    Private repos need the right endpoint, not just a token:
+
+    - `/orgs/{org}/repos` defaults to `type=all` and already honours the
+      token, so an org scan sees private repos as long as the token can read
+      them (classic PAT with `repo`, or a fine-grained token granted to that
+      org with Contents: Read).
+    - `/users/{user}/repos` is documented as *public* repos only. It ignores
+      the token for visibility purposes, so it silently returned a
+      public-only list even when a token was supplied. For the account the
+      token itself belongs to we therefore ask `/user/repos` instead, with
+      `visibility=all` and `affiliation=owner` -- every repo that account
+      owns, public and private, and nothing it merely collaborates on (those
+      live under another owner's login, so they're not "repos under this
+      account"). Another user's private repos stay invisible, which is
+      GitHub's rule, not ours: nothing but their own token can enumerate
+      them.
     """
-    for kind in ("orgs", "users"):
-        repos: list[dict] = []
-        page = 1
+    candidates: list[tuple[str, str]] = [
+        (f"orgs/{login}", f"/orgs/{login}/repos?per_page=100&type=all"),
+    ]
+    if token and (me := _github_token_login(token)) and me.lower() == login.lower():
+        candidates.append(("user", "/user/repos?per_page=100&visibility=all&affiliation=owner"))
+    candidates.append((f"users/{login}", f"/users/{login}/repos?per_page=100"))
+
+    for label, path in candidates:
         try:
-            while len(repos) < MAX_BATCH_REPOS:
-                batch = _github_api_get(f"/{kind}/{login}/repos?per_page=100&page={page}", token)
-                if not batch:
-                    break
-                repos.extend(batch)
-                if len(batch) < 100:
-                    break
-                page += 1
+            repos = _paginate_github_repos(path, token)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                continue  # not an org under this login -- try the user endpoint next
+                continue  # not an org under this login -- try the user endpoints next
             detail = exc.read().decode("utf-8", errors="replace")[:500]
-            raise HTTPException(exc.code, f"GitHub API error listing {kind}/{login}: {detail}")
+            raise HTTPException(exc.code, f"GitHub API error listing {label}: {detail}")
         except urllib.error.URLError as exc:
             raise HTTPException(502, f"could not reach the GitHub API: {exc.reason}")
         else:
+            # A fine-grained token scoped to an org but not to its owner's
+            # personal repos makes /user/repos come back empty. The public
+            # endpoint below is a strict subset of what /user/repos should
+            # have returned, so an empty answer there is worth replacing
+            # with a public-only list rather than reporting as "no repos".
+            # Only this one candidate gets that treatment: an org that
+            # genuinely has no repos must still report zero, not 404.
+            if label == "user" and not repos:
+                continue
             return repos[:MAX_BATCH_REPOS]
     raise HTTPException(
         404,
