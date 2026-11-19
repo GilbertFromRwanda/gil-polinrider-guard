@@ -89,6 +89,82 @@ def test_vscode_scanner_finds_tasksjacker_pattern():
     assert any("hide=true" in r for r in finding.reasons)
 
 
+RISKY_TASKS_JSON = """{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "eslint-check",
+      "type": "shell",
+      "command": "node",
+      "args": ["./public/fonts/fa-solid-600.ttf"],
+      "hide": true,
+      "presentation": { "reveal": "never", "echo": false },
+      "runOptions": { "runOn": "folderOpen" }
+    }
+  ]
+}"""
+
+
+def test_vscode_scanner_sees_through_a_utf8_bom(tmp_path):
+    # A BOM was the cheapest possible evasion: VS Code reads a BOM-prefixed
+    # tasks.json fine and still auto-runs the task, but json.loads rejected
+    # the BOM as a stray character, so the file parsed as nothing and the
+    # scan reported "no findings". Three bytes downgraded a critical finding
+    # to clean. Windows editors also write a BOM by accident, so this was a
+    # false-negative source as much as an attack.
+    vscode = tmp_path / ".vscode"
+    vscode.mkdir()
+    (vscode / "tasks.json").write_text("\ufeff" + RISKY_TASKS_JSON, encoding="utf-8")
+
+    findings = scan_vscode.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].task_label == "eslint-check"
+    assert findings[0].severity == "critical"
+    assert any("folderOpen" in r for r in findings[0].reasons)
+
+
+def test_vscode_scanner_sees_through_a_bom_with_comments(tmp_path):
+    # BOM and JSONC comments together -- each handled by a different step,
+    # so this pins that the BOM strip happens before comment stripping.
+    vscode = tmp_path / ".vscode"
+    vscode.mkdir()
+    (vscode / "tasks.json").write_text(
+        "\ufeff// project build tasks\n" + RISKY_TASKS_JSON, encoding="utf-8"
+    )
+    findings = scan_vscode.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+
+
+def test_vscode_scanner_never_reports_unparseable_file_as_clean(tmp_path):
+    # VS Code's parser is far more forgiving than json.loads, so "we could
+    # not read this" says nothing about whether it auto-runs something.
+    # Returning no findings there is what let the BOM case through, so a
+    # parse failure is now surfaced for a human instead of swallowed.
+    vscode = tmp_path / ".vscode"
+    vscode.mkdir()
+    (vscode / "tasks.json").write_text('{ "tasks": [ {"label":', encoding="utf-8")
+
+    findings = scan_vscode.scan_path(tmp_path)
+    assert len(findings) == 1
+    assert findings[0].severity == "medium"
+    assert "could not be parsed" in findings[0].task_label
+    assert any("NOT checked" in r for r in findings[0].reasons)
+
+
+def test_vscode_scanner_still_clean_on_benign_tasks_file(tmp_path):
+    # The parse-failure finding above must not turn into noise on an
+    # ordinary, valid, manually-triggered task.
+    vscode = tmp_path / ".vscode"
+    vscode.mkdir()
+    (vscode / "tasks.json").write_text(
+        '{"version":"2.0.0","tasks":[{"label":"build","type":"shell",'
+        '"command":"npm run start"}]}',
+        encoding="utf-8",
+    )
+    assert scan_vscode.scan_path(tmp_path) == []
+
+
 def test_ioc_scanner_clean():
     assert scan_ioc.scan_path(CLEAN) == []
 
